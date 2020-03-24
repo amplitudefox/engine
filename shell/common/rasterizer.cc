@@ -127,9 +127,8 @@ void Rasterizer::Draw(fml::RefPtr<Pipeline<flutter::LayerTree>> pipeline) {
   // if the raster status is to resubmit the frame, we push the frame to the
   // front of the queue and also change the consume status to more available.
   if (raster_status == RasterStatus::kResubmit) {
-    auto front_continuation = pipeline->ProduceToFront();
+    auto front_continuation = pipeline->ProduceIfEmpty();
     front_continuation.Complete(std::move(resubmitted_layer_tree_));
-    consume_result = PipelineConsumeResult::MoreAvailable;
   } else if (raster_status == RasterStatus::kEnqueuePipeline) {
     consume_result = PipelineConsumeResult::MoreAvailable;
   }
@@ -295,6 +294,7 @@ RasterStatus Rasterizer::DoDraw(
 }
 
 RasterStatus Rasterizer::DrawToSurface(flutter::LayerTree& layer_tree) {
+  TRACE_EVENT0("flutter", "Rasterizer::DrawToSurface");
   FML_DCHECK(surface_);
 
   auto frame = surface_->AcquireFrame(layer_tree.frame_size());
@@ -342,14 +342,23 @@ RasterStatus Rasterizer::DrawToSurface(flutter::LayerTree& layer_tree) {
     if (raster_status == RasterStatus::kFailed) {
       return raster_status;
     }
-    frame->Submit();
     if (external_view_embedder != nullptr) {
-      external_view_embedder->SubmitFrame(surface_->GetContext());
+      external_view_embedder->SubmitFrame(surface_->GetContext(),
+                                          root_surface_canvas);
+      // The external view embedder may mutate the root surface canvas while
+      // submitting the frame.
+      // Therefore, submit the final frame after asking the external view
+      // embedder to submit the frame.
+      frame->Submit();
+      external_view_embedder->FinishFrame();
+    } else {
+      frame->Submit();
     }
 
     FireNextFrameCallbackIfPresent();
 
     if (surface_->GetContext()) {
+      TRACE_EVENT0("flutter", "PerformDeferredSkiaCleanup");
       surface_->GetContext()->performDeferredCleanup(kSkiaCleanupExpiration);
     }
 

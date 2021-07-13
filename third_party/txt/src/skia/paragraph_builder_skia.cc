@@ -75,6 +75,8 @@ skt::ParagraphStyle TxtToSkia(const ParagraphStyle& txt) {
   skia.setTextDirection(static_cast<skt::TextDirection>(txt.text_direction));
   skia.setMaxLines(txt.max_lines);
   skia.setEllipsis(txt.ellipsis);
+  skia.setTextHeightBehavior(
+      static_cast<skt::TextHeightBehavior>(txt.text_height_behavior));
 
   skia.turnHintingOff();
 
@@ -105,6 +107,7 @@ skt::TextStyle TxtToSkia(const TextStyle& txt) {
   skia.setWordSpacing(SkDoubleToScalar(txt.word_spacing));
   skia.setHeight(SkDoubleToScalar(txt.height));
   skia.setHeightOverride(txt.has_height_override);
+  skia.setHalfLeading(txt.half_leading);
 
   skia.setLocale(SkString(txt.locale.c_str()));
   if (txt.has_background) {
@@ -123,7 +126,7 @@ skt::TextStyle TxtToSkia(const TextStyle& txt) {
   for (const txt::TextShadow& txt_shadow : txt.text_shadows) {
     skt::TextShadow shadow;
     shadow.fOffset = txt_shadow.offset;
-    shadow.fBlurRadius = txt_shadow.blur_radius;
+    shadow.fBlurSigma = txt_shadow.blur_sigma;
     shadow.fColor = txt_shadow.color;
     skia.addShadow(shadow);
   }
@@ -174,7 +177,7 @@ void ParagraphBuilderSkia::AddPlaceholder(PlaceholderRun& span) {
 }
 
 std::unique_ptr<Paragraph> ParagraphBuilderSkia::Build() {
-  return std::make_unique<ParagraphSkia>(builder_->Build());
+  return std::unique_ptr<Paragraph>(new ParagraphSkia(builder_->Build()));
 }
 
 }  // namespace txt

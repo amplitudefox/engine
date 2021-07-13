@@ -37,10 +37,8 @@ template("zip_bundle") {
   assert(defined(invoker.files), "files must be defined as a list of scopes")
   action(target_name) {
     script = "//flutter/build/zip.py"
-    outputs = [
-      "$root_build_dir/zip_archives/${invoker.output}",
-    ]
-    inputs = []
+    outputs = [ "$root_build_dir/zip_archives/${invoker.output}" ]
+    sources = []
     deps = invoker.deps
 
     args = [
@@ -51,9 +49,9 @@ template("zip_bundle") {
       args += [
         "-i",
         rebase_path(input.source),
-        rebase_path(input.destination),
+        input.destination,
       ]
-      inputs += [ input.source ]
+      sources += [ input.source ]
     }
   }
 }

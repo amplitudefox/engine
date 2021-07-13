@@ -2,19 +2,23 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:html' as html;
 
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart';
-import 'package:test/test.dart';
 
 import 'package:web_engine_tester/golden_tester.dart';
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   final Rect region = Rect.fromLTWH(8, 8, 500, 100); // Compensate for old scuba tester padding
 
-  BitmapCanvas canvas;
+  late BitmapCanvas canvas;
 
   final SurfacePaintData niceRRectPaint = SurfacePaintData()
     ..color = const Color.fromRGBO(250, 186, 218, 1.0) // #fabada
@@ -26,7 +30,8 @@ void main() async {
   const Radius someFixedRadius = Radius.circular(10);
 
   setUp(() {
-    canvas = BitmapCanvas(const Rect.fromLTWH(0, 0, 500, 100));
+    canvas = BitmapCanvas(const Rect.fromLTWH(0, 0, 500, 100),
+        RenderStrategy());
     canvas.translate(10, 10); // Center
   });
 
@@ -42,8 +47,22 @@ void main() async {
           niceRRectPaint);
     }
 
-    html.document.body.append(canvas.rootElement);
+    html.document.body!.append(canvas.rootElement);
     await matchGoldenFile('canvas_rrect_round_square.png', region: region);
+  });
+
+  /// Regression test for https://github.com/flutter/flutter/issues/62631
+  test('round square with flipped left/right coordinates', () async {
+    canvas.translate(35, 320);
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+          Rect.fromLTRB(-30, -100, 30, -300),
+          Radius.circular(30)),
+      niceRRectPaint);
+    canvas.drawPath(Path()..moveTo(0, 0)..lineTo(20, 0), niceRRectPaint);
+    html.document.body!.append(canvas.rootElement);
+    await matchGoldenFile('canvas_rrect_flipped.png',
+        region: Rect.fromLTWH(0, 0, 100, 200));
   });
 
   test('round rect with big radius scale down smaller radius', () async {
@@ -58,7 +77,7 @@ void main() async {
       canvas.drawRRect(rrect, niceRRectPaint);
     }
 
-    html.document.body.append(canvas.rootElement);
+    html.document.body!.append(canvas.rootElement);
     await matchGoldenFile('canvas_rrect_overlapping_radius.png', region: region);
   });
 
@@ -81,7 +100,7 @@ void main() async {
       canvas.drawDRRect(outerRRect, innerRRect, niceRRectPaint);
     }
 
-    html.document.body.append(canvas.rootElement);
+    html.document.body!.append(canvas.rootElement);
     await matchGoldenFile('canvas_drrect_overlapping_radius.png', region: region);
   });
 }

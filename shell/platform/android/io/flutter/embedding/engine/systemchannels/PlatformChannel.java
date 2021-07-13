@@ -5,7 +5,6 @@
 package io.flutter.embedding.engine.systemchannels;
 
 import android.content.pm.ActivityInfo;
-import android.graphics.Rect;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.VisibleForTesting;
@@ -15,7 +14,7 @@ import io.flutter.plugin.common.JSONMethodCodec;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.List;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -32,7 +31,7 @@ public class PlatformChannel {
   @Nullable private PlatformMessageHandler platformMessageHandler;
 
   @NonNull @VisibleForTesting
-  protected final MethodChannel.MethodCallHandler parsingMethodCallHandler =
+  final MethodChannel.MethodCallHandler parsingMethodCallHandler =
       new MethodChannel.MethodCallHandler() {
         @Override
         public void onMethodCall(@NonNull MethodCall call, @NonNull MethodChannel.Result result) {
@@ -104,6 +103,22 @@ public class PlatformChannel {
                   result.error("error", exception.getMessage(), null);
                 }
                 break;
+              case "SystemChrome.setEnabledSystemUIMode":
+                try {
+                  SystemUiMode mode = decodeSystemUiMode((String) arguments);
+                  platformMessageHandler.showSystemUiMode(mode);
+                  result.success(null);
+                } catch (JSONException | NoSuchFieldException exception) {
+                  // JSONException: One or more expected fields were either omitted or referenced an
+                  // invalid type.
+                  // NoSuchFieldException: One or more of the overlay names are invalid.
+                  result.error("error", exception.getMessage(), null);
+                }
+                break;
+              case "SystemChrome.setSystemUIChangeListener":
+                platformMessageHandler.setSystemUiChangeListener();
+                result.success(null);
+                break;
               case "SystemChrome.restoreSystemUIOverlays":
                 platformMessageHandler.restoreSystemUiOverlays();
                 result.success(null);
@@ -123,31 +138,6 @@ public class PlatformChannel {
                 break;
               case "SystemNavigator.pop":
                 platformMessageHandler.popSystemNavigator();
-                result.success(null);
-                break;
-              case "SystemGestures.getSystemGestureExclusionRects":
-                List<Rect> exclusionRects = platformMessageHandler.getSystemGestureExclusionRects();
-                if (exclusionRects == null) {
-                  String incorrectApiLevel = "Exclusion rects only exist for Android API 29+.";
-                  result.error("error", incorrectApiLevel, null);
-                  break;
-                }
-
-                ArrayList<HashMap<String, Integer>> encodedExclusionRects =
-                    encodeExclusionRects(exclusionRects);
-                result.success(encodedExclusionRects);
-                break;
-              case "SystemGestures.setSystemGestureExclusionRects":
-                if (!(arguments instanceof JSONArray)) {
-                  String inputTypeError =
-                      "Input type is incorrect. Ensure that a List<Map<String, int>> is passed as the input for SystemGestureExclusionRects.setSystemGestureExclusionRects.";
-                  result.error("inputTypeError", inputTypeError, null);
-                  break;
-                }
-
-                JSONArray inputRects = (JSONArray) arguments;
-                ArrayList<Rect> decodedRects = decodeExclusionRects(inputRects);
-                platformMessageHandler.setSystemGestureExclusionRects(decodedRects);
                 result.success(null);
                 break;
               case "Clipboard.getData":
@@ -182,6 +172,14 @@ public class PlatformChannel {
                   result.success(null);
                   break;
                 }
+              case "Clipboard.hasStrings":
+                {
+                  boolean hasStrings = platformMessageHandler.clipboardHasStrings();
+                  JSONObject response = new JSONObject();
+                  response.put("value", hasStrings);
+                  result.success(response);
+                  break;
+                }
               default:
                 result.notImplemented();
                 break;
@@ -211,6 +209,12 @@ public class PlatformChannel {
    */
   public void setPlatformMessageHandler(@Nullable PlatformMessageHandler platformMessageHandler) {
     this.platformMessageHandler = platformMessageHandler;
+  }
+
+  /** Informs Flutter of a change in the SystemUI overlays. */
+  public void systemChromeChanged(boolean overlaysAreVisible) {
+    Log.v(TAG, "Sending 'systemUIChange' message.");
+    channel.invokeMethod("SystemChrome.systemUIChange", Arrays.asList(overlaysAreVisible));
   }
 
   // TODO(mattcarroll): add support for IntDef annotations, then add @ScreenOrientation
@@ -295,68 +299,6 @@ public class PlatformChannel {
     return ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
   }
 
-  /**
-   * Decodes a JSONArray of rectangle data into an ArrayList<Rect>.
-   *
-   * <p>Since View.setSystemGestureExclusionRects receives a JSONArray containing JSONObjects, these
-   * values need to be transformed into the expected input of View.setSystemGestureExclusionRects,
-   * which is ArrayList<Rect>.
-   *
-   * <p>This method is used by the SystemGestures.setSystemGestureExclusionRects platform channel.
-   *
-   * @throws JSONException if {@code inputRects} does not contain expected keys and value types.
-   */
-  @NonNull
-  private ArrayList<Rect> decodeExclusionRects(@NonNull JSONArray inputRects) throws JSONException {
-    ArrayList<Rect> exclusionRects = new ArrayList<Rect>();
-    for (int i = 0; i < inputRects.length(); i++) {
-      JSONObject rect = inputRects.getJSONObject(i);
-      int top;
-      int right;
-      int bottom;
-      int left;
-
-      try {
-        top = rect.getInt("top");
-        right = rect.getInt("right");
-        bottom = rect.getInt("bottom");
-        left = rect.getInt("left");
-      } catch (JSONException exception) {
-        throw new JSONException(
-            "Incorrect JSON data shape. To set system gesture exclusion rects, \n"
-                + "a JSONObject with top, right, bottom and left values need to be set to int values.");
-      }
-
-      Rect gestureRect = new Rect(left, top, right, bottom);
-      exclusionRects.add(gestureRect);
-    }
-
-    return exclusionRects;
-  }
-
-  /**
-   * Encodes a List<Rect> provided by the Android host into an ArrayList<HashMap<String, Integer>>.
-   *
-   * <p>Since View.getSystemGestureExclusionRects returns a list of Rects, these Rects need to be
-   * transformed into UTF-8 encoded JSON messages to be properly decoded by the Flutter framework.
-   *
-   * <p>This method is used by the SystemGestures.getSystemGestureExclusionRects platform channel.
-   */
-  private ArrayList<HashMap<String, Integer>> encodeExclusionRects(List<Rect> exclusionRects) {
-    ArrayList<HashMap<String, Integer>> encodedExclusionRects =
-        new ArrayList<HashMap<String, Integer>>();
-    for (Rect rect : exclusionRects) {
-      HashMap<String, Integer> rectMap = new HashMap<String, Integer>();
-      rectMap.put("top", rect.top);
-      rectMap.put("right", rect.right);
-      rectMap.put("bottom", rect.bottom);
-      rectMap.put("left", rect.left);
-      encodedExclusionRects.add(rectMap);
-    }
-
-    return encodedExclusionRects;
-  }
-
   @NonNull
   private AppSwitcherDescription decodeAppSwitcherDescription(
       @NonNull JSONObject encodedDescription) throws JSONException {
@@ -395,6 +337,32 @@ public class PlatformChannel {
   }
 
   /**
+   * Decodes an object of JSON-encoded mode to a {@link SystemUiMode}.
+   *
+   * @throws JSONException if {@code encodedSystemUiMode} does not contain expected keys and value
+   *     types.
+   * @throws NoSuchFieldException if any of the given encoded mode name is invalid.
+   */
+  @NonNull
+  private SystemUiMode decodeSystemUiMode(@NonNull String encodedSystemUiMode)
+      throws JSONException, NoSuchFieldException {
+    SystemUiMode mode = SystemUiMode.fromValue(encodedSystemUiMode);
+    switch (mode) {
+      case LEAN_BACK:
+        return SystemUiMode.LEAN_BACK;
+      case IMMERSIVE:
+        return SystemUiMode.IMMERSIVE;
+      case IMMERSIVE_STICKY:
+        return SystemUiMode.IMMERSIVE_STICKY;
+      case EDGE_TO_EDGE:
+        return SystemUiMode.EDGE_TO_EDGE;
+    }
+
+    // Execution should never ever get this far, but if it does, we default to edge to edge.
+    return SystemUiMode.EDGE_TO_EDGE;
+  }
+
+  /**
    * Decodes a JSON-encoded {@code encodedStyle} to a {@link SystemChromeStyle}.
    *
    * @throws JSONException if {@code encodedStyle} does not contain expected keys and value types.
@@ -403,22 +371,19 @@ public class PlatformChannel {
   @NonNull
   private SystemChromeStyle decodeSystemChromeStyle(@NonNull JSONObject encodedStyle)
       throws JSONException, NoSuchFieldException {
-    Brightness systemNavigationBarIconBrightness = null;
-    // TODO(mattcarroll): add color annotation
-    Integer systemNavigationBarColor = null;
-    // TODO(mattcarroll): add color annotation
-    Integer systemNavigationBarDividerColor = null;
-    Brightness statusBarIconBrightness = null;
     // TODO(mattcarroll): add color annotation
     Integer statusBarColor = null;
+    Brightness statusBarIconBrightness = null;
+    boolean systemStatusBarContrastEnforced = true;
+    // TODO(mattcarroll): add color annotation
+    Integer systemNavigationBarColor = null;
+    Brightness systemNavigationBarIconBrightness = null;
+    // TODO(mattcarroll): add color annotation
+    Integer systemNavigationBarDividerColor = null;
+    boolean systemNavigationBarContrastEnforced = true;
 
-    if (!encodedStyle.isNull("systemNavigationBarIconBrightness")) {
-      systemNavigationBarIconBrightness =
-          Brightness.fromValue(encodedStyle.getString("systemNavigationBarIconBrightness"));
-    }
-
-    if (!encodedStyle.isNull("systemNavigationBarColor")) {
-      systemNavigationBarColor = encodedStyle.getInt("systemNavigationBarColor");
+    if (!encodedStyle.isNull("statusBarColor")) {
+      statusBarColor = encodedStyle.getInt("statusBarColor");
     }
 
     if (!encodedStyle.isNull("statusBarIconBrightness")) {
@@ -426,20 +391,36 @@ public class PlatformChannel {
           Brightness.fromValue(encodedStyle.getString("statusBarIconBrightness"));
     }
 
-    if (!encodedStyle.isNull("statusBarColor")) {
-      statusBarColor = encodedStyle.getInt("statusBarColor");
+    if (!encodedStyle.isNull("systemStatusBarContrastEnforced")) {
+      systemStatusBarContrastEnforced = encodedStyle.getBoolean("systemStatusBarContrastEnforced");
+    }
+
+    if (!encodedStyle.isNull("systemNavigationBarColor")) {
+      systemNavigationBarColor = encodedStyle.getInt("systemNavigationBarColor");
+    }
+
+    if (!encodedStyle.isNull("systemNavigationBarIconBrightness")) {
+      systemNavigationBarIconBrightness =
+          Brightness.fromValue(encodedStyle.getString("systemNavigationBarIconBrightness"));
     }
 
     if (!encodedStyle.isNull("systemNavigationBarDividerColor")) {
       systemNavigationBarDividerColor = encodedStyle.getInt("systemNavigationBarDividerColor");
     }
 
+    if (!encodedStyle.isNull("systemNavigationBarContrastEnforced")) {
+      systemNavigationBarContrastEnforced =
+          encodedStyle.getBoolean("systemNavigationBarContrastEnforced");
+    }
+
     return new SystemChromeStyle(
         statusBarColor,
         statusBarIconBrightness,
+        systemStatusBarContrastEnforced,
         systemNavigationBarColor,
         systemNavigationBarIconBrightness,
-        systemNavigationBarDividerColor);
+        systemNavigationBarDividerColor,
+        systemNavigationBarContrastEnforced);
   }
 
   /**
@@ -481,11 +462,42 @@ public class PlatformChannel {
     void showSystemOverlays(@NonNull List<SystemUiOverlay> overlays);
 
     /**
-     * The Flutter application would like to restore the visibility of system overlays to the last
-     * set of overlays sent via {@link #showSystemOverlays(List)}.
+     * The Flutter application would like the Android system to display the given {@code mode}.
      *
-     * <p>If {@link #showSystemOverlays(List)} has yet to be called, then a default system overlay
-     * appearance is desired:
+     * <p>{@link SystemUiMode#LEAN_BACK} refers to a fullscreen experience that restores system bars
+     * upon tapping anywhere in the application. This tap gesture is not received by the
+     * application.
+     *
+     * <p>{@link SystemUiMode#IMMERSIVE} refers to a fullscreen experience that restores system bars
+     * upon swiping from the edge of the viewport. This swipe gesture is not recived by the
+     * application.
+     *
+     * <p>{@link SystemUiMode#IMMERSIVE_STICKY} refers to a fullscreen experience that restores
+     * system bars upon swiping from the edge of the viewport. This swipe gesture is received by the
+     * application, in contrast to {@link SystemUiMode#IMMERSIVE}.
+     *
+     * <p>{@link SystemUiMode#EDGE_TO_EDGE} refers to a layout configuration that will consume the
+     * full viewport. This full screen experience does not hide status bars. These status bars can
+     * be set to transparent, making the buttons and icons hover over the fullscreen application.
+     */
+    void showSystemUiMode(@NonNull SystemUiMode mode);
+
+    /**
+     * The Flutter application would like the Android system to notify the framework when the system
+     * ui visibility has changed.
+     *
+     * <p>This is relevant when using {@link SystemUiMode}s for fullscreen applications, from which
+     * the system overlays can appear or disappear based on user input.
+     */
+    void setSystemUiChangeListener();
+
+    /**
+     * The Flutter application would like to restore the visibility of system overlays to the last
+     * set of overlays sent via {@link #showSystemOverlays(List)} or {@link
+     * #showSystemUiMode(SystemUiMode)}.
+     *
+     * <p>If {@link #showSystemOverlays(List)} or {@link #showSystemUiMode(SystemUiMode)} has yet to
+     * be called, then a default system overlay appearance is desired:
      *
      * <p>{@code View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN }
      */
@@ -516,19 +528,17 @@ public class PlatformChannel {
      */
     void setClipboardData(@NonNull String text);
 
-    /** The Flutter application would like to get the system gesture exclusion rects. */
-    List<Rect> getSystemGestureExclusionRects();
-
     /**
-     * The Flutter application would like to set the system gesture exclusion rects through the
-     * given {@code rects}.
+     * The Flutter application would like to know if the clipboard currently contains a string that
+     * can be pasted.
      */
-    void setSystemGestureExclusionRects(@NonNull ArrayList<Rect> rects);
+    boolean clipboardHasStrings();
   }
 
   /** Types of sounds the Android OS can play on behalf of an application. */
   public enum SoundType {
-    CLICK("SystemSoundType.click");
+    CLICK("SystemSoundType.click"),
+    ALERT("SystemSoundType.alert");
 
     @NonNull
     static SoundType fromValue(@NonNull String encodedName) throws NoSuchFieldException {
@@ -625,6 +635,35 @@ public class PlatformChannel {
     }
   }
 
+  /** The set of Android system fullscreen modes as perceived by the Flutter application. */
+  public enum SystemUiMode {
+    LEAN_BACK("SystemUiMode.leanBack"),
+    IMMERSIVE("SystemUiMode.immersive"),
+    IMMERSIVE_STICKY("SystemUiMode.immersiveSticky"),
+    EDGE_TO_EDGE("SystemUiMode.edgeToEdge");
+
+    /**
+     * Returns the SystemUiMode for the provied encoded value. @throws NoSuchFieldException if any
+     * of the given encoded overlay names are invalid.
+     */
+    @NonNull
+    static SystemUiMode fromValue(@NonNull String encodedName) throws NoSuchFieldException {
+      for (SystemUiMode mode : SystemUiMode.values()) {
+        if (mode.encodedName.equals(encodedName)) {
+          return mode;
+        }
+      }
+      throw new NoSuchFieldException("No such SystemUiMode: " + encodedName);
+    }
+
+    @NonNull private String encodedName;
+
+    /** Returens the encoded {@link SystemUiMode} */
+    SystemUiMode(@NonNull String encodedName) {
+      this.encodedName = encodedName;
+    }
+  }
+
   /**
    * The color and label of an application that appears in Android's app switcher, AKA recents
    * screen.
@@ -645,23 +684,29 @@ public class PlatformChannel {
     // TODO(mattcarroll): add color annotation
     @Nullable public final Integer statusBarColor;
     @Nullable public final Brightness statusBarIconBrightness;
+    @Nullable public final boolean systemStatusBarContrastEnforced;
     // TODO(mattcarroll): add color annotation
     @Nullable public final Integer systemNavigationBarColor;
     @Nullable public final Brightness systemNavigationBarIconBrightness;
     // TODO(mattcarroll): add color annotation
     @Nullable public final Integer systemNavigationBarDividerColor;
+    @Nullable public final boolean systemNavigationBarContrastEnforced;
 
     public SystemChromeStyle(
         @Nullable Integer statusBarColor,
         @Nullable Brightness statusBarIconBrightness,
+        @Nullable boolean systemStatusBarContrastEnforced,
         @Nullable Integer systemNavigationBarColor,
         @Nullable Brightness systemNavigationBarIconBrightness,
-        @Nullable Integer systemNavigationBarDividerColor) {
+        @Nullable Integer systemNavigationBarDividerColor,
+        @Nullable boolean systemNavigationBarContrastEnforced) {
       this.statusBarColor = statusBarColor;
       this.statusBarIconBrightness = statusBarIconBrightness;
+      this.systemStatusBarContrastEnforced = systemStatusBarContrastEnforced;
       this.systemNavigationBarColor = systemNavigationBarColor;
       this.systemNavigationBarIconBrightness = systemNavigationBarIconBrightness;
       this.systemNavigationBarDividerColor = systemNavigationBarDividerColor;
+      this.systemNavigationBarContrastEnforced = systemNavigationBarContrastEnforced;
     }
   }
 

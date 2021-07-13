@@ -21,11 +21,11 @@
 #include <lib/vfs/cpp/pseudo_dir.h>
 #include <lib/zx/eventpair.h>
 
-#include "engine.h"
 #include "flutter/common/settings.h"
 #include "flutter/fml/macros.h"
 
-#include "thread.h"
+#include "engine.h"
+#include "flutter_runner_product_configuration.h"
 #include "unique_fdio_ns.h"
 
 namespace flutter_runner {
@@ -33,12 +33,12 @@ namespace flutter_runner {
 class Application;
 
 struct ActiveApplication {
-  std::unique_ptr<Thread> thread;
+  std::unique_ptr<fml::Thread> platform_thread;
   std::unique_ptr<Application> application;
 
   ActiveApplication& operator=(ActiveApplication&& other) noexcept {
     if (this != &other) {
-      this->thread.reset(other.thread.release());
+      this->platform_thread.reset(other.platform_thread.release());
       this->application.reset(other.application.release());
     }
     return *this;
@@ -69,6 +69,11 @@ class Application final : public Engine::Delegate,
   // may be collected after.
   ~Application();
 
+  static void ParseProgramMetadata(
+      const fidl::VectorPtr<fuchsia::sys::ProgramMetadata>& program_metadata,
+      std::string* data_path,
+      std::string* assets_path);
+
   const std::string& GetDebugLabel() const;
 
 #if !defined(DART_PRODUCT)
@@ -77,10 +82,11 @@ class Application final : public Engine::Delegate,
 
  private:
   flutter::Settings settings_;
+  FlutterRunnerProductConfiguration product_config_;
   TerminationCallback termination_callback_;
   const std::string debug_label_;
   UniqueFDIONS fdio_ns_ = UniqueFDIONSCreate();
-  fml::UniqueFD application_directory_;
+  fml::UniqueFD application_data_directory_;
   fml::UniqueFD application_assets_directory_;
 
   fidl::Binding<fuchsia::sys::ComponentController> application_controller_;
@@ -112,15 +118,18 @@ class Application final : public Engine::Delegate,
 
   // |fuchsia::ui::app::ViewProvider|
   void CreateView(
-      zx::eventpair view_token,
+      zx::eventpair token,
       fidl::InterfaceRequest<fuchsia::sys::ServiceProvider> incoming_services,
       fidl::InterfaceHandle<fuchsia::sys::ServiceProvider> outgoing_services)
       override;
 
+  // |fuchsia::ui::app::ViewProvider|
+  void CreateViewWithViewRef(zx::eventpair view_token,
+                             fuchsia::ui::views::ViewRefControl control_ref,
+                             fuchsia::ui::views::ViewRef view_ref) override;
+
   // |flutter::Engine::Delegate|
   void OnEngineTerminate(const Engine* holder) override;
-
-  void AttemptVMLaunchWithCurrentSettings(const flutter::Settings& settings);
 
   FML_DISALLOW_COPY_AND_ASSIGN(Application);
 };

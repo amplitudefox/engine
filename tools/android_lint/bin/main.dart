@@ -33,8 +33,9 @@ Future<void> main(List<String> args) async {
 }
 
 Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
+  final String inArgument = argResults['in'] as String;
   final Directory androidDir = Directory(path.join(
-    argResults['in'],
+    inArgument,
     'flutter',
     'shell',
     'platform',
@@ -48,7 +49,7 @@ Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
   }
 
   final Directory androidSdkDir = Directory(
-    path.join(argResults['in'], 'third_party', 'android_tools', 'sdk'),
+    path.join(inArgument, 'third_party', 'android_tools', 'sdk'),
   );
 
   if (!androidSdkDir.existsSync()) {
@@ -58,17 +59,18 @@ Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
     return -1;
   }
 
-  if (argResults['rebaseline']) {
+  final bool rebaseline = argResults['rebaseline'] as bool;
+  if (rebaseline) {
     print('Removing previous baseline.xml...');
     final File baselineXml = File(baselineXmlPath);
     if (baselineXml.existsSync()) {
       await baselineXml.delete();
     }
   }
-  print('Preparing projext.xml...');
+  print('Preparing project.xml...');
   final IOSink projectXml = File(projectXmlPath).openWrite();
-  projectXml.write(
-      '''<!-- THIS FILE IS GENERATED. PLEASE USE THE INCLUDED DART PROGRAM  WHICH -->
+  projectXml.write('''
+<!-- THIS FILE IS GENERATED. PLEASE USE THE INCLUDED DART PROGRAM  WHICH -->
 <!-- WILL AUTOMATICALLY FIND ALL .java FILES AND INCLUDE THEM HERE       -->
 <project>
   <sdk dir="${androidSdkDir.path}" />
@@ -82,7 +84,8 @@ Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
     projectXml.writeln('    <src file="${entity.path}" />');
   }
 
-  projectXml.write('''  </module>
+  projectXml.write('''
+  </module>
 </project>
 ''');
   await projectXml.close();
@@ -99,10 +102,11 @@ Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
     '--baseline',
     baselineXmlPath,
   ];
-  if (argResults['html']) {
-    lintArgs.addAll(<String>['--html', argResults['out']]);
+  final bool html = argResults['html'] as bool;
+  if (html) {
+    lintArgs.addAll(<String>['--html', argResults['out'] as String]);
   }
-  final String javaHome = await getJavaHome();
+  final String? javaHome = await getJavaHome();
   final Process lintProcess = await processManager.start(
     lintArgs,
     environment: javaHome != null
@@ -113,7 +117,7 @@ Future<int> runLint(ArgParser argParser, ArgResults argResults) async {
   );
   lintProcess.stdout.pipe(stdout);
   lintProcess.stderr.pipe(stderr);
-  return await lintProcess.exitCode;
+  return lintProcess.exitCode;
 }
 
 /// Prepares an [ArgParser] for this script.
@@ -154,7 +158,7 @@ ArgParser setupOptions() {
     )
     ..addOption(
       'out',
-      help: 'The path to write the generated the HTML report to. Ignored if '
+      help: 'The path to write the generated HTML report. Ignored if '
           '--html is not also true.',
       defaultsTo: path.join(projectDir, 'lint_report'),
     );
@@ -165,13 +169,13 @@ ArgParser setupOptions() {
 /// On macOS, we can try to find Java 1.8.
 ///
 /// Otherwise, default to whatever JAVA_HOME is already.
-Future<String> getJavaHome() async {
+Future<String?> getJavaHome() async {
   if (Platform.isMacOS) {
     final ProcessResult result = await processManager.run(
       <String>['/usr/libexec/java_home', '-v', '1.8', '-F'],
     );
     if (result.exitCode == 0) {
-      return result.stdout.trim();
+      return (result.stdout as String).trim();
     }
   }
   return Platform.environment['JAVA_HOME'];
@@ -201,7 +205,7 @@ Future<void> checkJava1_8() async {
     print(javaResult.stderr);
   }
   // `java -version` writes to stderr.
-  final String javaVersionStdout = javaResult.stderr;
+  final String javaVersionStdout = javaResult.stderr as String;
   if (!javaVersionStdout.contains('"1.8')) {
     print('The Android SDK tools may not work properly with your Java version. '
         'If this process fails, please retry using Java 1.8.');

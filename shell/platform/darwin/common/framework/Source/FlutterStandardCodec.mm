@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "FlutterStandardCodec_Internal.h"
+#import "flutter/shell/platform/darwin/common/framework/Source/FlutterStandardCodec_Internal.h"
 
 #pragma mark - Codec for basic message channel
 
@@ -45,7 +45,7 @@
 }
 
 - (id)decode:(NSData*)message {
-  if (message == nil)
+  if ([message length] == 0)
     return nil;
   FlutterStandardReader* reader = [_readerWriter readerWithData:message];
   id value = [reader readValue];
@@ -160,6 +160,10 @@ using namespace flutter;
 
 + (instancetype)typedDataWithInt64:(NSData*)data {
   return [FlutterStandardTypedData typedDataWithData:data type:FlutterStandardDataTypeInt64];
+}
+
++ (instancetype)typedDataWithFloat32:(NSData*)data {
+  return [FlutterStandardTypedData typedDataWithData:data type:FlutterStandardDataTypeFloat32];
 }
 
 + (instancetype)typedDataWithFloat64:(NSData*)data {
@@ -443,6 +447,7 @@ using namespace flutter;
     case FlutterStandardFieldUInt8Data:
     case FlutterStandardFieldInt32Data:
     case FlutterStandardFieldInt64Data:
+    case FlutterStandardFieldFloat32Data:
     case FlutterStandardFieldFloat64Data:
       return [self readTypedDataOfType:FlutterStandardDataTypeForField(field)];
     case FlutterStandardFieldList: {

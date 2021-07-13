@@ -2,14 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
-import 'package:test/test.dart';
+import 'package:test/bootstrap/browser.dart';
 import 'package:ui/ui.dart';
 import 'package:ui/src/engine.dart';
 
 import 'scuba.dart';
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   final EngineScubaTester scuba = await EngineScubaTester.initialize(
     viewportSize: const Size(800, 800),
   );
@@ -221,7 +224,7 @@ void main() async {
   testEachCanvas('draws text with a shadow', (EngineCanvas canvas) {
     drawTextWithShadow(canvas);
     return scuba.diffCanvasScreenshot(canvas, 'text_shadow', maxDiffRatePercent: 0.2);
-  }, bSkipHoudini: true);
+  });
 
   testEachCanvas('Handles disabled strut style', (EngineCanvas canvas) {
     // Flutter uses [StrutStyle.disabled] for the [SelectableText] widget. This

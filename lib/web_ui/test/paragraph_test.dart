@@ -2,36 +2,44 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart' hide window;
 
-import 'package:test/test.dart';
 
-void testEachMeasurement(String description, VoidCallback body, {bool skip}) {
+void testEachMeasurement(String description, VoidCallback body, {bool? skip}) {
   test('$description (dom measurement)', () async {
     try {
       TextMeasurementService.initialize(rulerCacheCapacity: 2);
-      WebExperiments.instance.useCanvasText = false;
+      WebExperiments.instance!.useCanvasText = false;
+      WebExperiments.instance!.useCanvasRichText = false;
       return body();
     } finally {
-      WebExperiments.instance.useCanvasText = null;
+      WebExperiments.instance!.useCanvasText = null;
+      WebExperiments.instance!.useCanvasRichText = null;
       TextMeasurementService.clearCache();
     }
   }, skip: skip);
   test('$description (canvas measurement)', () async {
     try {
       TextMeasurementService.initialize(rulerCacheCapacity: 2);
-      WebExperiments.instance.useCanvasText = true;
+      WebExperiments.instance!.useCanvasText = true;
+      WebExperiments.instance!.useCanvasRichText = false;
       return body();
     } finally {
-      WebExperiments.instance.useCanvasText = null;
+      WebExperiments.instance!.useCanvasText = null;
+      WebExperiments.instance!.useCanvasRichText = null;
       TextMeasurementService.clearCache();
     }
   }, skip: skip);
 }
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   await webOnlyInitializeTestDomRenderer();
 
   // Ahem font uses a constant ideographic/alphabetic baseline ratio.
@@ -186,7 +194,8 @@ void main() async {
   test('getPositionForOffset multi-line', () {
     // [Paragraph.getPositionForOffset] for multi-line text doesn't work well
     // with dom-based measurement.
-    WebExperiments.instance.useCanvasText = true;
+    WebExperiments.instance!.useCanvasText = true;
+    WebExperiments.instance!.useCanvasRichText = false;
     TextMeasurementService.initialize(rulerCacheCapacity: 2);
 
     final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
@@ -282,11 +291,13 @@ void main() async {
     );
 
     TextMeasurementService.clearCache();
-    WebExperiments.instance.useCanvasText = null;
+    WebExperiments.instance!.useCanvasText = null;
+    WebExperiments.instance!.useCanvasRichText = null;
   });
 
   test('getPositionForOffset multi-line centered', () {
-    WebExperiments.instance.useCanvasText = true;
+    WebExperiments.instance!.useCanvasText = true;
+    WebExperiments.instance!.useCanvasRichText = false;
     TextMeasurementService.initialize(rulerCacheCapacity: 2);
 
     final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
@@ -389,7 +400,44 @@ void main() async {
     );
 
     TextMeasurementService.clearCache();
-    WebExperiments.instance.useCanvasText = null;
+    WebExperiments.instance!.useCanvasText = null;
+    WebExperiments.instance!.useCanvasRichText = null;
+  });
+
+  test('getWordBoundary', () {
+    final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle())
+      ..addText('Lorem ipsum dolor');
+    final Paragraph paragraph = builder.build();
+
+    const TextRange loremRange = TextRange(start: 0, end: 5);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 0)), loremRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 1)), loremRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 2)), loremRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 3)), loremRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 4)), loremRange);
+
+    const TextRange firstSpace = TextRange(start: 5, end: 6);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 5)), firstSpace);
+
+    const TextRange ipsumRange = TextRange(start: 6, end: 11);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 6)), ipsumRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 7)), ipsumRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 8)), ipsumRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 9)), ipsumRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 10)), ipsumRange);
+
+    const TextRange secondSpace = TextRange(start: 11, end: 12);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 11)), secondSpace);
+
+    const TextRange dolorRange = TextRange(start: 12, end: 17);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 12)), dolorRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 13)), dolorRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 14)), dolorRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 15)), dolorRange);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 16)), dolorRange);
+
+    const TextRange endRange = TextRange(start: 17, end: 17);
+    expect(paragraph.getWordBoundary(TextPosition(offset: 17)), endRange);
   });
 
   testEachMeasurement('getBoxesForRange returns a box', () {
@@ -406,12 +454,31 @@ void main() async {
     expect(
       paragraph.getBoxesForRange(1, 2).single,
       const TextBox.fromLTRBD(
-        10,
+        970,
         0,
-        20,
+        980,
         10,
         TextDirection.rtl,
       ),
+    );
+  });
+
+  testEachMeasurement('getBoxesForRange returns a box for rich text', () {
+    final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
+      fontFamily: 'Ahem',
+      fontStyle: FontStyle.normal,
+      fontWeight: FontWeight.normal,
+      fontSize: 10,
+      textDirection: TextDirection.ltr,
+    ));
+    builder.addText('abcd');
+    builder.pushStyle(TextStyle(fontWeight: FontWeight.bold));
+    builder.addText('xyz');
+    final Paragraph paragraph = builder.build();
+    paragraph.layout(const ParagraphConstraints(width: 1000));
+    expect(
+      paragraph.getBoxesForRange(1, 2).single,
+      const TextBox.fromLTRBD(0, 0, 0, 10, TextDirection.ltr),
     );
   });
 
@@ -782,9 +849,50 @@ void main() async {
     );
   });
 
+  testEachMeasurement('getBoxesForRange includes trailing spaces', () {
+    const String text = 'abcd abcde  ';
+    final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
+      fontFamily: 'Ahem',
+      fontStyle: FontStyle.normal,
+      fontWeight: FontWeight.normal,
+      fontSize: 10,
+    ));
+    builder.addText(text);
+    final Paragraph paragraph = builder.build();
+    paragraph.layout(const ParagraphConstraints(width: double.infinity));
+    expect(
+      paragraph.getBoxesForRange(0, text.length),
+      <TextBox>[
+        TextBox.fromLTRBD(0.0, 0.0, 120.0, 10.0, TextDirection.ltr),
+      ],
+    );
+  });
+
+  testEachMeasurement('getBoxesForRange multi-line includes trailing spaces', () {
+    const String text = 'abcd\nabcde  \nabc';
+    final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
+      fontFamily: 'Ahem',
+      fontStyle: FontStyle.normal,
+      fontWeight: FontWeight.normal,
+      fontSize: 10,
+    ));
+    builder.addText(text);
+    final Paragraph paragraph = builder.build();
+    paragraph.layout(const ParagraphConstraints(width: double.infinity));
+    expect(
+      paragraph.getBoxesForRange(0, text.length),
+      <TextBox>[
+        TextBox.fromLTRBD(0.0, 0.0, 40.0, 10.0, TextDirection.ltr),
+        TextBox.fromLTRBD(0.0, 10.0, 70.0, 20.0, TextDirection.ltr),
+        TextBox.fromLTRBD(0.0, 20.0, 30.0, 30.0, TextDirection.ltr),
+      ],
+    );
+  });
+
   test('longestLine', () {
     // [Paragraph.longestLine] is only supported by canvas-based measurement.
-    WebExperiments.instance.useCanvasText = true;
+    WebExperiments.instance!.useCanvasText = true;
+    WebExperiments.instance!.useCanvasRichText = false;
     TextMeasurementService.initialize(rulerCacheCapacity: 2);
 
     final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
@@ -799,7 +907,8 @@ void main() async {
     expect(paragraph.longestLine, 50.0);
 
     TextMeasurementService.clearCache();
-    WebExperiments.instance.useCanvasText = null;
+    WebExperiments.instance!.useCanvasText = null;
+    WebExperiments.instance!.useCanvasRichText = null;
   });
 
   testEachMeasurement('getLineBoundary (single-line)', () {
@@ -826,7 +935,8 @@ void main() async {
   test('getLineBoundary (multi-line)', () {
     // [Paragraph.getLineBoundary] for multi-line paragraphs is only supported
     // by canvas-based measurement.
-    WebExperiments.instance.useCanvasText = true;
+    WebExperiments.instance!.useCanvasText = true;
+    WebExperiments.instance!.useCanvasRichText = false;
     TextMeasurementService.initialize(rulerCacheCapacity: 2);
 
     final ParagraphBuilder builder = ParagraphBuilder(ParagraphStyle(
@@ -869,7 +979,8 @@ void main() async {
     }
 
     TextMeasurementService.clearCache();
-    WebExperiments.instance.useCanvasText = null;
+    WebExperiments.instance!.useCanvasText = null;
+    WebExperiments.instance!.useCanvasRichText = null;
   });
 
   testEachMeasurement('width should be a whole integer', () {

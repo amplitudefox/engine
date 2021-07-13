@@ -2,31 +2,39 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#define FML_USED_ON_EMBEDDER
+
 #include "engine.h"
 
 #include <lib/async/cpp/task.h>
-#include <lib/ui/scenic/cpp/view_ref_pair.h>
 #include <zircon/status.h>
-#include <sstream>
 
+#include "flutter/common/graphics/persistent_cache.h"
 #include "flutter/common/task_runners.h"
 #include "flutter/fml/make_copyable.h"
+#include "flutter/fml/message_loop.h"
 #include "flutter/fml/synchronization/waitable_event.h"
 #include "flutter/fml/task_runner.h"
 #include "flutter/runtime/dart_vm_lifecycle.h"
 #include "flutter/shell/common/rasterizer.h"
 #include "flutter/shell/common/run_configuration.h"
+#include "flutter/shell/common/serialization_callbacks.h"
+#include "third_party/skia/include/core/SkPicture.h"
+#include "third_party/skia/include/core/SkSerialProcs.h"
+#include "third_party/skia/include/ports/SkFontMgr_fuchsia.h"
+
+#include "../runtime/dart/utils/files.h"
+#include "focus_delegate.h"
 #include "fuchsia_intl.h"
 #include "platform_view.h"
-#include "runtime/dart/utils/files.h"
-#include "task_runner_adapter.h"
-#include "third_party/skia/include/ports/SkFontMgr_fuchsia.h"
-#include "thread.h"
+#include "surface.h"
+#include "vsync_waiter.h"
 
 namespace flutter_runner {
+namespace {
 
-static void UpdateNativeThreadLabelNames(const std::string& label,
-                                         const flutter::TaskRunners& runners) {
+void UpdateNativeThreadLabelNames(const std::string& label,
+                                  const flutter::TaskRunners& runners) {
   auto set_thread_name = [](fml::RefPtr<fml::TaskRunner> runner,
                             std::string prefix, std::string suffix) {
     if (!runner) {
@@ -38,50 +46,116 @@ static void UpdateNativeThreadLabelNames(const std::string& label,
   };
   set_thread_name(runners.GetPlatformTaskRunner(), label, ".platform");
   set_thread_name(runners.GetUITaskRunner(), label, ".ui");
-  set_thread_name(runners.GetGPUTaskRunner(), label, ".gpu");
+  set_thread_name(runners.GetRasterTaskRunner(), label, ".raster");
   set_thread_name(runners.GetIOTaskRunner(), label, ".io");
 }
 
-static fml::RefPtr<flutter::PlatformMessage> MakeLocalizationPlatformMessage(
+std::unique_ptr<flutter::PlatformMessage> MakeLocalizationPlatformMessage(
     const fuchsia::intl::Profile& intl_profile) {
-  return fml::MakeRefCounted<flutter::PlatformMessage>(
+  return std::make_unique<flutter::PlatformMessage>(
       "flutter/localization", MakeLocalizationPlatformMessageData(intl_profile),
       nullptr);
 }
+
+}  // namespace
 
 Engine::Engine(Delegate& delegate,
                std::string thread_label,
                std::shared_ptr<sys::ServiceDirectory> svc,
                std::shared_ptr<sys::ServiceDirectory> runner_services,
                flutter::Settings settings,
-               fml::RefPtr<const flutter::DartSnapshot> isolate_snapshot,
                fuchsia::ui::views::ViewToken view_token,
+               scenic::ViewRefPair view_ref_pair,
                UniqueFDIONS fdio_ns,
-               fidl::InterfaceRequest<fuchsia::io::Directory> directory_request)
+               fidl::InterfaceRequest<fuchsia::io::Directory> directory_request,
+               FlutterRunnerProductConfiguration product_config)
     : delegate_(delegate),
       thread_label_(std::move(thread_label)),
-      settings_(std::move(settings)),
+      intercept_all_input_(product_config.get_intercept_all_input()),
       weak_factory_(this) {
-  if (zx::event::create(0, &vsync_event_) != ZX_OK) {
-    FML_DLOG(ERROR) << "Could not create the vsync event.";
-    return;
-  }
+  // Get the task runners from the managed threads. The current thread will be
+  // used as the "platform" thread.
+  fml::RefPtr<fml::TaskRunner> platform_task_runner =
+      fml::MessageLoop::GetCurrent().GetTaskRunner();
 
-  // Launch the threads that will be used to run the shell. These threads will
-  // be joined in the destructor.
-  for (auto& thread : threads_) {
-    thread.reset(new Thread());
-  }
+  const flutter::TaskRunners task_runners(
+      thread_label_,                // Dart thread labels
+      platform_task_runner,         // platform
+      threads_[0].GetTaskRunner(),  // raster
+      threads_[1].GetTaskRunner(),  // ui
+      threads_[2].GetTaskRunner()   // io
+  );
+  UpdateNativeThreadLabelNames(thread_label_, task_runners);
 
-  // Set up the session connection.
+  // Connect to Scenic.
   auto scenic = svc->Connect<fuchsia::ui::scenic::Scenic>();
+  fuchsia::ui::scenic::SessionEndpoints endpoints;
   fidl::InterfaceHandle<fuchsia::ui::scenic::Session> session;
+  endpoints.set_session(session.NewRequest());
   fidl::InterfaceHandle<fuchsia::ui::scenic::SessionListener> session_listener;
   auto session_listener_request = session_listener.NewRequest();
-  scenic->CreateSession(session.NewRequest(), session_listener.Bind());
+  endpoints.set_session_listener(session_listener.Bind());
+  fidl::InterfaceHandle<fuchsia::ui::views::Focuser> focuser;
+  endpoints.set_view_focuser(focuser.NewRequest());
+  fidl::InterfaceHandle<fuchsia::ui::views::ViewRefFocused> view_ref_focused;
+  endpoints.set_view_ref_focused(view_ref_focused.NewRequest());
+  scenic->CreateSessionT(std::move(endpoints), [] {});
 
-  // Grab the parent environment services. The platform view may want to access
-  // some of these services.
+  // Make clones of the `ViewRef` before sending it down to Scenic, since the
+  // refs are not copyable, and multiple consumers need view refs.
+  fuchsia::ui::views::ViewRef platform_view_ref;
+  view_ref_pair.view_ref.Clone(&platform_view_ref);
+  fuchsia::ui::views::ViewRef accessibility_bridge_view_ref;
+  view_ref_pair.view_ref.Clone(&accessibility_bridge_view_ref);
+  fuchsia::ui::views::ViewRef isolate_view_ref;
+  view_ref_pair.view_ref.Clone(&isolate_view_ref);
+  // Input3 keyboard listener registration requires a ViewRef as an event
+  // filter. So we clone it here, as ViewRefs can not be reused, only cloned.
+  fuchsia::ui::views::ViewRef keyboard_view_ref;
+  view_ref_pair.view_ref.Clone(&keyboard_view_ref);
+
+  // Session is terminated on the raster thread, but we must terminate ourselves
+  // on the platform thread.
+  //
+  // This handles the fidl error callback when the Session connection is
+  // broken. The SessionListener interface also has an OnError method, which is
+  // invoked on the platform thread (in PlatformView).
+  fml::closure session_error_callback = [task_runner = platform_task_runner,
+                                         weak = weak_factory_.GetWeakPtr()]() {
+    task_runner->PostTask([weak]() {
+      if (weak) {
+        weak->Terminate();
+      }
+    });
+  };
+
+  // Set up the session connection and other Scenic helpers on the raster
+  // thread. We also need to wait for the external view embedder to be set up
+  // before creating the shell.
+  fml::AutoResetWaitableEvent view_embedder_latch;
+  task_runners.GetRasterTaskRunner()->PostTask(fml::MakeCopyable(
+      [this, session = std::move(session),
+       session_error_callback = std::move(session_error_callback),
+       view_token = std::move(view_token),
+       view_ref_pair = std::move(view_ref_pair),
+       max_frames_in_flight = product_config.get_max_frames_in_flight(),
+       &view_embedder_latch,
+       vsync_offset = product_config.get_vsync_offset()]() mutable {
+        session_connection_ = std::make_shared<DefaultSessionConnection>(
+            thread_label_, std::move(session),
+            std::move(session_error_callback), [](auto) {},
+            max_frames_in_flight, vsync_offset);
+        surface_producer_.emplace(session_connection_->get());
+        external_view_embedder_ = std::make_shared<FuchsiaExternalViewEmbedder>(
+            thread_label_, std::move(view_token), std::move(view_ref_pair),
+            *session_connection_.get(), surface_producer_.value(),
+            intercept_all_input_);
+        view_embedder_latch.Signal();
+      }));
+  view_embedder_latch.Wait();
+
+  // Grab the parent environment services. The platform view may want to
+  // access some of these services.
   fuchsia::sys::EnvironmentPtr environment;
   svc->Connect(environment.NewRequest());
   fidl::InterfaceHandle<fuchsia::sys::ServiceProvider>
@@ -89,55 +163,162 @@ Engine::Engine(Delegate& delegate,
   environment->GetServices(parent_environment_service_provider.NewRequest());
   environment.Unbind();
 
-  // We need to manually schedule a frame when the session metrics change.
-  OnMetricsUpdate on_session_metrics_change_callback = std::bind(
-      &Engine::OnSessionMetricsDidChange, this, std::placeholders::_1);
+  AccessibilityBridge::SetSemanticsEnabledCallback
+      set_semantics_enabled_callback = [this](bool enabled) {
+        auto platform_view = shell_->GetPlatformView();
 
-  OnSizeChangeHint on_session_size_change_hint_callback =
-      std::bind(&Engine::OnSessionSizeChangeHint, this, std::placeholders::_1,
-                std::placeholders::_2);
+        if (platform_view) {
+          platform_view->SetSemanticsEnabled(enabled);
+        }
+      };
+
+  AccessibilityBridge::DispatchSemanticsActionCallback
+      dispatch_semantics_action_callback =
+          [this](int32_t node_id, flutter::SemanticsAction action) {
+            auto platform_view = shell_->GetPlatformView();
+
+            if (platform_view) {
+              platform_view->DispatchSemanticsAction(node_id, action, {});
+            }
+          };
+
+  accessibility_bridge_ = std::make_unique<AccessibilityBridge>(
+      std::move(set_semantics_enabled_callback),
+      std::move(dispatch_semantics_action_callback), svc,
+      std::move(accessibility_bridge_view_ref));
 
   OnEnableWireframe on_enable_wireframe_callback = std::bind(
-      &Engine::OnDebugWireframeSettingsChanged, this, std::placeholders::_1);
+      &Engine::DebugWireframeSettingsChanged, this, std::placeholders::_1);
+
+  OnCreateView on_create_view_callback = std::bind(
+      &Engine::CreateView, this, std::placeholders::_1, std::placeholders::_2,
+      std::placeholders::_3, std::placeholders::_4, std::placeholders::_5);
+
+  OnUpdateView on_update_view_callback = std::bind(
+      &Engine::UpdateView, this, std::placeholders::_1, std::placeholders::_2,
+      std::placeholders::_3, std::placeholders::_4);
+
+  OnDestroyView on_destroy_view_callback = std::bind(
+      &Engine::DestroyView, this, std::placeholders::_1, std::placeholders::_2);
+
+  OnCreateSurface on_create_surface_callback =
+      std::bind(&Engine::CreateSurface, this);
 
   // SessionListener has a OnScenicError method; invoke this callback on the
   // platform thread when that happens. The Session itself should also be
   // disconnected when this happens, and it will also attempt to terminate.
   fit::closure on_session_listener_error_callback =
-      [dispatcher = async_get_default_dispatcher(),
+      [task_runner = platform_task_runner,
        weak = weak_factory_.GetWeakPtr()]() {
-        async::PostTask(dispatcher, [weak]() {
+        task_runner->PostTask([weak]() {
           if (weak) {
             weak->Terminate();
           }
         });
       };
 
-  auto view_ref_pair = scenic::ViewRefPair::New();
-  fuchsia::ui::views::ViewRef view_ref;
-  view_ref_pair.view_ref.Clone(&view_ref);
+  // Launch the engine in the appropriate configuration.
+  // Note: this initializes the Asset Manager on the global PersistantCache
+  // so it must be called before WarmupSkps() is called below.
+  auto run_configuration = flutter::RunConfiguration::InferFromSettings(
+      settings, task_runners.GetIOTaskRunner());
 
-  fuchsia::ui::views::ViewRef dart_view_ref;
-  view_ref_pair.view_ref.Clone(&dart_view_ref);
-  zx::eventpair dart_view_ref_event_pair(std::move(dart_view_ref.reference));
+  // Connect to fuchsia.ui.input3.Keyboard to hand out a listener.
+  using fuchsia::ui::input3::Keyboard;
+  using fuchsia::ui::input3::KeyboardListener;
+
+  // Keyboard client-side stub.
+  keyboard_svc_ = svc->Connect<Keyboard>();
+  ZX_ASSERT(keyboard_svc_.is_bound());
+  // KeyboardListener handle pair is not initialized until NewRequest() is
+  // called.
+  fidl::InterfaceHandle<KeyboardListener> keyboard_listener;
+
+  // Server side of KeyboardListener.  Initializes the keyboard_listener
+  // handle.
+  fidl::InterfaceRequest<KeyboardListener> keyboard_listener_request =
+      keyboard_listener.NewRequest();
+  ZX_ASSERT(keyboard_listener_request.is_valid());
+
+  keyboard_svc_->AddListener(std::move(keyboard_view_ref),
+                             keyboard_listener.Bind(), [] {});
+
+  OnSemanticsNodeUpdate on_semantics_node_update_callback =
+      [this](flutter::SemanticsNodeUpdates updates, float pixel_ratio) {
+        accessibility_bridge_->AddSemanticsNodeUpdate(updates, pixel_ratio);
+      };
+
+  OnRequestAnnounce on_request_announce_callback =
+      [this](const std::string& message) {
+        accessibility_bridge_->RequestAnnounce(message);
+      };
 
   // Setup the callback that will instantiate the platform view.
   flutter::Shell::CreateCallback<flutter::PlatformView>
       on_create_platform_view = fml::MakeCopyable(
-          [debug_label = thread_label_, view_ref = std::move(view_ref),
-           runner_services,
+          [this, debug_label = thread_label_,
+           view_ref = std::move(platform_view_ref), runner_services,
            parent_environment_service_provider =
                std::move(parent_environment_service_provider),
            session_listener_request = std::move(session_listener_request),
+           focuser = std::move(focuser),
+           view_ref_focused = std::move(view_ref_focused),
            on_session_listener_error_callback =
                std::move(on_session_listener_error_callback),
-           on_session_metrics_change_callback =
-               std::move(on_session_metrics_change_callback),
-           on_session_size_change_hint_callback =
-               std::move(on_session_size_change_hint_callback),
            on_enable_wireframe_callback =
                std::move(on_enable_wireframe_callback),
-           vsync_handle = vsync_event_.get()](flutter::Shell& shell) mutable {
+           on_create_view_callback = std::move(on_create_view_callback),
+           on_update_view_callback = std::move(on_update_view_callback),
+           on_destroy_view_callback = std::move(on_destroy_view_callback),
+           on_create_surface_callback = std::move(on_create_surface_callback),
+           on_semantics_node_update_callback =
+               std::move(on_semantics_node_update_callback),
+           on_request_announce_callback =
+               std::move(on_request_announce_callback),
+           external_view_embedder = GetExternalViewEmbedder(),
+           keyboard_listener_request = std::move(keyboard_listener_request),
+           await_vsync_callback =
+               [this](FireCallbackCallback cb) {
+                 session_connection_->AwaitVsync(cb);
+               },
+           await_vsync_for_secondary_callback_callback =
+               [this](FireCallbackCallback cb) {
+                 session_connection_->AwaitVsyncForSecondaryCallback(cb);
+               },
+           product_config](flutter::Shell& shell) mutable {
+            OnShaderWarmup on_shader_warmup = nullptr;
+            if (product_config.enable_shader_warmup()) {
+              FML_DCHECK(surface_producer_);
+              if (product_config.enable_shader_warmup_dart_hooks()) {
+                on_shader_warmup =
+                    [this, &shell](
+                        const std::vector<std::string>& skp_names,
+                        std::function<void(uint32_t)> completion_callback,
+                        uint64_t width, uint64_t height) {
+                      WarmupSkps(
+                          shell.GetDartVM()
+                              ->GetConcurrentMessageLoop()
+                              ->GetTaskRunner()
+                              .get(),
+                          shell.GetTaskRunners().GetRasterTaskRunner().get(),
+                          surface_producer_.value(), width, height,
+                          flutter::PersistentCache::GetCacheForProcess()
+                              ->asset_manager(),
+                          skp_names, completion_callback);
+                    };
+              } else {
+                WarmupSkps(shell.GetDartVM()
+                               ->GetConcurrentMessageLoop()
+                               ->GetTaskRunner()
+                               .get(),
+                           shell.GetTaskRunners().GetRasterTaskRunner().get(),
+                           surface_producer_.value(), 1024, 600,
+                           flutter::PersistentCache::GetCacheForProcess()
+                               ->asset_manager(),
+                           std::nullopt, std::nullopt);
+              }
+            }
+
             return std::make_unique<flutter_runner::PlatformView>(
                 shell,                   // delegate
                 debug_label,             // debug label
@@ -146,81 +327,33 @@ Engine::Engine(Delegate& delegate,
                 std::move(runner_services),
                 std::move(parent_environment_service_provider),  // services
                 std::move(session_listener_request),  // session listener
+                std::move(view_ref_focused), std::move(focuser),
+                // Server-side part of the fuchsia.ui.input3.KeyboardListener
+                // connection.
+                std::move(keyboard_listener_request),
                 std::move(on_session_listener_error_callback),
-                std::move(on_session_metrics_change_callback),
-                std::move(on_session_size_change_hint_callback),
                 std::move(on_enable_wireframe_callback),
-                vsync_handle  // vsync handle
-            );
+                std::move(on_create_view_callback),
+                std::move(on_update_view_callback),
+                std::move(on_destroy_view_callback),
+                std::move(on_create_surface_callback),
+                std::move(on_semantics_node_update_callback),
+                std::move(on_request_announce_callback),
+                std::move(on_shader_warmup), external_view_embedder,
+                // Callbacks for VsyncWaiter to call into SessionConnection.
+                await_vsync_callback,
+                await_vsync_for_secondary_callback_callback);
           });
-
-  // Session can be terminated on the GPU thread, but we must terminate
-  // ourselves on the platform thread.
-  //
-  // This handles the fidl error callback when the Session connection is
-  // broken. The SessionListener interface also has an OnError method, which is
-  // invoked on the platform thread (in PlatformView).
-  fml::closure on_session_error_callback =
-      [dispatcher = async_get_default_dispatcher(),
-       weak = weak_factory_.GetWeakPtr()]() {
-        async::PostTask(dispatcher, [weak]() {
-          if (weak) {
-            weak->Terminate();
-          }
-        });
-      };
-
-  // Get the task runners from the managed threads. The current thread will be
-  // used as the "platform" thread.
-  const flutter::TaskRunners task_runners(
-      thread_label_,  // Dart thread labels
-      CreateFMLTaskRunner(async_get_default_dispatcher()),  // platform
-      CreateFMLTaskRunner(threads_[0]->dispatcher()),       // gpu
-      CreateFMLTaskRunner(threads_[1]->dispatcher()),       // ui
-      CreateFMLTaskRunner(threads_[2]->dispatcher())        // io
-  );
 
   // Setup the callback that will instantiate the rasterizer.
   flutter::Shell::CreateCallback<flutter::Rasterizer> on_create_rasterizer =
-      fml::MakeCopyable([thread_label = thread_label_,              //
-                         view_token = std::move(view_token),        //
-                         view_ref_pair = std::move(view_ref_pair),  //
-                         session = std::move(session),              //
-                         on_session_error_callback,                 //
-                         vsync_event = vsync_event_.get()           //
-  ](flutter::Shell& shell) mutable {
-        std::unique_ptr<flutter_runner::CompositorContext> compositor_context;
-        {
-          TRACE_DURATION("flutter", "CreateCompositorContext");
-          compositor_context =
-              std::make_unique<flutter_runner::CompositorContext>(
-                  thread_label,           // debug label
-                  std::move(view_token),  // scenic view we attach our tree to
-                  std::move(view_ref_pair),  // scenic view ref/view ref control
-                  std::move(session),        // scenic session
-                  on_session_error_callback,  // session did encounter error
-                  vsync_event                 // vsync event handle
-              );
-        }
+      [](flutter::Shell& shell) {
+        return std::make_unique<flutter::Rasterizer>(shell);
+      };
 
-        return std::make_unique<flutter::Rasterizer>(
-            shell.GetTaskRunners(),        // task runners
-            std::move(compositor_context)  // compositor context
-        );
-      });
-
-  UpdateNativeThreadLabelNames(thread_label_, task_runners);
-
-  settings_.verbose_logging = true;
-
-  settings_.advisory_script_uri = thread_label_;
-
-  settings_.advisory_script_entrypoint = thread_label_;
-
-  settings_.root_isolate_create_callback =
+  settings.root_isolate_create_callback =
       std::bind(&Engine::OnMainIsolateStart, this);
-
-  settings_.root_isolate_shutdown_callback =
+  settings.root_isolate_shutdown_callback =
       std::bind([weak = weak_factory_.GetWeakPtr(),
                  runner = task_runners.GetPlatformTaskRunner()]() {
         runner->PostTask([weak = std::move(weak)] {
@@ -230,22 +363,14 @@ Engine::Engine(Delegate& delegate,
         });
       });
 
-  auto vm = flutter::DartVMRef::Create(settings_);
-
-  if (!isolate_snapshot) {
-    isolate_snapshot = vm->GetVMData()->GetIsolateSnapshot();
-  }
-
   {
     TRACE_EVENT0("flutter", "CreateShell");
     shell_ = flutter::Shell::Create(
-        task_runners,                 // host task runners
-        flutter::WindowData(),        // default window data
-        settings_,                    // shell launch settings
-        std::move(isolate_snapshot),  // isolate snapshot
-        on_create_platform_view,      // platform view create callback
-        on_create_rasterizer,         // rasterizer create callback
-        std::move(vm)                 // vm reference
+        flutter::PlatformData(),             // default window data
+        std::move(task_runners),             // host task runners
+        std::move(settings),                 // shell launch settings
+        std::move(on_create_platform_view),  // platform view create callback
+        std::move(on_create_rasterizer)      // rasterizer create callback
     );
   }
 
@@ -254,17 +379,17 @@ Engine::Engine(Delegate& delegate,
     return;
   }
 
-  // Shell has been created. Before we run the engine, setup the isolate
+  // Shell has been created. Before we run the engine, set up the isolate
   // configurator.
   {
     fuchsia::sys::EnvironmentPtr environment;
     svc->Connect(environment.NewRequest());
 
     isolate_configurator_ = std::make_unique<IsolateConfigurator>(
-        std::move(fdio_ns),                  //
-        std::move(environment),              //
-        directory_request.TakeChannel(),     //
-        std::move(dart_view_ref_event_pair)  //
+        std::move(fdio_ns),                    //
+        std::move(environment),                //
+        directory_request.TakeChannel(),       //
+        std::move(isolate_view_ref.reference)  //
     );
   }
 
@@ -303,7 +428,7 @@ Engine::Engine(Delegate& delegate,
       auto message = MakeLocalizationPlatformMessage(profile);
       FML_VLOG(-1) << "Sending LocalizationPlatformMessage";
       flutter_runner_engine->shell_->GetPlatformView()->DispatchPlatformMessage(
-          message);
+          std::move(message));
     };
 
     FML_VLOG(-1) << "Requesting intl Profile";
@@ -319,10 +444,6 @@ Engine::Engine(Delegate& delegate,
       intl_property_provider_->GetProfile(get_profile_callback);
     };
   }
-
-  // Launch the engine in the appropriate configuration.
-  auto run_configuration = flutter::RunConfiguration::InferFromSettings(
-      settings_, task_runners.GetIOTaskRunner());
 
   auto on_run_failure = [weak = weak_factory_.GetWeakPtr()]() {
     // The engine could have been killed by the caller right after the
@@ -359,19 +480,16 @@ Engine::Engine(Delegate& delegate,
 
 Engine::~Engine() {
   shell_.reset();
-  for (const auto& thread : threads_) {
-    thread->Quit();
-  }
-  for (const auto& thread : threads_) {
-    thread->Join();
+  for (auto& thread : threads_) {
+    thread.Join();
   }
 }
 
-std::pair<bool, uint32_t> Engine::GetEngineReturnCode() const {
-  std::pair<bool, uint32_t> code(false, 0);
+std::optional<uint32_t> Engine::GetEngineReturnCode() const {
   if (!shell_) {
-    return code;
+    return std::nullopt;
   }
+  std::optional<uint32_t> code;
   fml::AutoResetWaitableEvent latch;
   fml::TaskRunner::RunNowOrPostTask(
       shell_->GetTaskRunners().GetUITaskRunner(),
@@ -385,53 +503,6 @@ std::pair<bool, uint32_t> Engine::GetEngineReturnCode() const {
   return code;
 }
 
-static void CreateCompilationTrace(Dart_Isolate isolate) {
-  Dart_EnterIsolate(isolate);
-
-  {
-    Dart_EnterScope();
-    uint8_t* trace = nullptr;
-    intptr_t trace_length = 0;
-    Dart_Handle result = Dart_SaveCompilationTrace(&trace, &trace_length);
-    tonic::LogIfError(result);
-
-    for (intptr_t start = 0; start < trace_length;) {
-      intptr_t end = start;
-      while ((end < trace_length) && trace[end] != '\n')
-        end++;
-
-      std::string line(reinterpret_cast<char*>(&trace[start]), end - start);
-      FML_LOG(INFO) << "compilation-trace: " << line;
-
-      start = end + 1;
-    }
-
-    Dart_ExitScope();
-  }
-
-  // Re-enter Dart scope to release the compilation trace's memory.
-
-  {
-    Dart_EnterScope();
-    uint8_t* feedback = nullptr;
-    intptr_t feedback_length = 0;
-    Dart_Handle result = Dart_SaveTypeFeedback(&feedback, &feedback_length);
-    tonic::LogIfError(result);
-    const std::string kTypeFeedbackFile = "/data/dart_type_feedback.bin";
-    if (dart_utils::WriteFile(kTypeFeedbackFile,
-                              reinterpret_cast<const char*>(feedback),
-                              feedback_length)) {
-      FML_LOG(INFO) << "Dart type feedback written to " << kTypeFeedbackFile;
-    } else {
-      FML_LOG(ERROR) << "Could not write Dart type feedback to "
-                     << kTypeFeedbackFile;
-    }
-    Dart_ExitScope();
-  }
-
-  Dart_ExitIsolate();
-}
-
 void Engine::OnMainIsolateStart() {
   if (!isolate_configurator_ ||
       !isolate_configurator_->ConfigureCurrentIsolate()) {
@@ -440,20 +511,6 @@ void Engine::OnMainIsolateStart() {
   }
   FML_DLOG(INFO) << "Main isolate for engine '" << thread_label_
                  << "' was started.";
-
-  const intptr_t kCompilationTraceDelayInSeconds = 0;
-  if (kCompilationTraceDelayInSeconds != 0) {
-    Dart_Isolate isolate = Dart_CurrentIsolate();
-    FML_CHECK(isolate);
-    shell_->GetTaskRunners().GetUITaskRunner()->PostDelayedTask(
-        [engine = shell_->GetEngine(), isolate]() {
-          if (!engine) {
-            return;
-          }
-          CreateCompilationTrace(isolate);
-        },
-        fml::TimeDelta::FromSeconds(kCompilationTraceDelayInSeconds));
-  }
 }
 
 void Engine::OnMainIsolateShutdown() {
@@ -468,58 +525,69 @@ void Engine::Terminate() {
   // collected this object.
 }
 
-void Engine::OnSessionMetricsDidChange(
-    const fuchsia::ui::gfx::Metrics& metrics) {
-  if (!shell_) {
-    return;
-  }
+void Engine::DebugWireframeSettingsChanged(bool enabled) {
+  FML_CHECK(shell_);
 
-  shell_->GetTaskRunners().GetGPUTaskRunner()->PostTask(
-      [rasterizer = shell_->GetRasterizer(), metrics]() {
-        if (rasterizer) {
-          auto compositor_context =
-              reinterpret_cast<flutter_runner::CompositorContext*>(
-                  rasterizer->compositor_context());
+  shell_->GetTaskRunners().GetRasterTaskRunner()->PostTask([this, enabled]() {
+    FML_CHECK(external_view_embedder_);
+    external_view_embedder_->EnableWireframe(enabled);
+  });
+}
 
-          compositor_context->OnSessionMetricsDidChange(metrics);
-        }
+void Engine::CreateView(int64_t view_id,
+                        ViewCallback on_view_created,
+                        ViewIdCallback on_view_bound,
+                        bool hit_testable,
+                        bool focusable) {
+  FML_CHECK(shell_);
+
+  shell_->GetTaskRunners().GetRasterTaskRunner()->PostTask(
+      [this, view_id, hit_testable, focusable,
+       on_view_created = std::move(on_view_created),
+       on_view_bound = std::move(on_view_bound)]() {
+        FML_CHECK(external_view_embedder_);
+        external_view_embedder_->CreateView(view_id, std::move(on_view_created),
+                                            std::move(on_view_bound));
+        external_view_embedder_->SetViewProperties(view_id, SkRect::MakeEmpty(),
+                                                   hit_testable, focusable);
       });
 }
 
-void Engine::OnDebugWireframeSettingsChanged(bool enabled) {
-  if (!shell_) {
-    return;
-  }
+void Engine::UpdateView(int64_t view_id,
+                        SkRect occlusion_hint,
+                        bool hit_testable,
+                        bool focusable) {
+  FML_CHECK(shell_);
 
-  shell_->GetTaskRunners().GetGPUTaskRunner()->PostTask(
-      [rasterizer = shell_->GetRasterizer(), enabled]() {
-        if (rasterizer) {
-          auto compositor_context =
-              reinterpret_cast<flutter_runner::CompositorContext*>(
-                  rasterizer->compositor_context());
-
-          compositor_context->OnWireframeEnabled(enabled);
-        }
+  shell_->GetTaskRunners().GetRasterTaskRunner()->PostTask(
+      [this, view_id, occlusion_hint, hit_testable, focusable]() {
+        FML_CHECK(external_view_embedder_);
+        external_view_embedder_->SetViewProperties(view_id, occlusion_hint,
+                                                   hit_testable, focusable);
       });
 }
 
-void Engine::OnSessionSizeChangeHint(float width_change_factor,
-                                     float height_change_factor) {
-  if (!shell_) {
-    return;
-  }
+void Engine::DestroyView(int64_t view_id, ViewIdCallback on_view_unbound) {
+  FML_CHECK(shell_);
 
-  shell_->GetTaskRunners().GetGPUTaskRunner()->PostTask(
-      [rasterizer = shell_->GetRasterizer(), width_change_factor,
-       height_change_factor]() {
-        if (rasterizer) {
-          auto compositor_context = reinterpret_cast<CompositorContext*>(
-              rasterizer->compositor_context());
-
-          compositor_context->OnSessionSizeChangeHint(width_change_factor,
-                                                      height_change_factor);
-        }
+  shell_->GetTaskRunners().GetRasterTaskRunner()->PostTask(
+      [this, view_id, on_view_unbound = std::move(on_view_unbound)]() {
+        FML_CHECK(external_view_embedder_);
+        external_view_embedder_->DestroyView(view_id,
+                                             std::move(on_view_unbound));
       });
+}
+
+std::unique_ptr<flutter::Surface> Engine::CreateSurface() {
+  return std::make_unique<Surface>(thread_label_, GetExternalViewEmbedder(),
+                                   surface_producer_->gr_context());
+}
+
+std::shared_ptr<flutter::ExternalViewEmbedder>
+Engine::GetExternalViewEmbedder() {
+  FML_CHECK(external_view_embedder_);
+
+  return external_view_embedder_;
 }
 
 #if !defined(DART_PRODUCT)
@@ -533,5 +601,106 @@ void Engine::WriteProfileToTrace() const {
   }
 }
 #endif  // !defined(DART_PRODUCT)
+
+void Engine::WarmupSkps(
+    fml::BasicTaskRunner* concurrent_task_runner,
+    fml::BasicTaskRunner* raster_task_runner,
+    VulkanSurfaceProducer& surface_producer,
+    uint64_t width,
+    uint64_t height,
+    std::shared_ptr<flutter::AssetManager> asset_manager,
+    std::optional<const std::vector<std::string>> skp_names,
+    std::optional<std::function<void(uint32_t)>> completion_callback) {
+  SkISize size = SkISize::Make(width, height);
+
+  // We use a raw pointer here because we want to keep this alive until all gpu
+  // work is done and the callbacks skia takes for this are function pointers
+  // so we are unable to use a lambda that captures the smart pointer.
+  SurfaceProducerSurface* skp_warmup_surface =
+      surface_producer.ProduceOffscreenSurface(size).release();
+  if (!skp_warmup_surface) {
+    FML_LOG(ERROR) << "Failed to create offscreen warmup surface";
+    return;
+  }
+
+  // tell concurrent task runner to deserialize all skps available from
+  // the asset manager
+  concurrent_task_runner->PostTask([raster_task_runner, skp_warmup_surface,
+                                    &surface_producer, asset_manager, skp_names,
+                                    completion_callback]() {
+    TRACE_DURATION("flutter", "DeserializeSkps");
+    std::vector<std::unique_ptr<fml::Mapping>> skp_mappings;
+    if (skp_names) {
+      for (auto& skp_name : skp_names.value()) {
+        auto skp_mapping = asset_manager->GetAsMapping(skp_name);
+        if (skp_mapping) {
+          skp_mappings.push_back(std::move(skp_mapping));
+        } else {
+          FML_LOG(ERROR) << "Failed to get mapping for " << skp_name;
+        }
+      }
+    } else {
+      skp_mappings = asset_manager->GetAsMappings(".*\\.skp$", "shaders");
+    }
+
+    size_t total_size = 0;
+    for (auto& mapping : skp_mappings) {
+      total_size += mapping->GetSize();
+    }
+
+    FML_LOG(INFO) << "Shader warmup got " << skp_mappings.size()
+                  << " skp's with a total size of " << total_size << " bytes";
+
+    std::vector<sk_sp<SkPicture>> pictures;
+    unsigned int i = 0;
+    for (auto& mapping : skp_mappings) {
+      std::unique_ptr<SkMemoryStream> stream =
+          SkMemoryStream::MakeDirect(mapping->GetMapping(), mapping->GetSize());
+      SkDeserialProcs procs = {0};
+      procs.fImageProc = flutter::DeserializeImageWithoutData;
+      procs.fTypefaceProc = flutter::DeserializeTypefaceWithoutData;
+      sk_sp<SkPicture> picture =
+          SkPicture::MakeFromStream(stream.get(), &procs);
+      if (!picture) {
+        FML_LOG(ERROR) << "Failed to deserialize picture " << i;
+        continue;
+      }
+
+      // Tell raster task runner to warmup have the compositor
+      // context warm up the newly deserialized picture
+      raster_task_runner->PostTask([skp_warmup_surface, picture,
+                                    &surface_producer, completion_callback, i,
+                                    count = skp_mappings.size()] {
+        TRACE_DURATION("flutter", "WarmupSkp");
+        skp_warmup_surface->GetSkiaSurface()->getCanvas()->drawPicture(picture);
+
+        if (i < count - 1) {
+          // For all but the last skp we fire and forget
+          surface_producer.gr_context()->flushAndSubmit();
+        } else {
+          // For the last skp we provide a callback that frees the warmup
+          // surface and calls the completion callback
+          struct GrFlushInfo flush_info;
+          flush_info.fFinishedContext = skp_warmup_surface;
+          flush_info.fFinishedProc = [](void* skp_warmup_surface) {
+            delete static_cast<SurfaceProducerSurface*>(skp_warmup_surface);
+          };
+
+          surface_producer.gr_context()->flush(flush_info);
+          surface_producer.gr_context()->submit();
+
+          // We call this here instead of inside fFinishedProc above because
+          // we want to unblock the dart animation code as soon as the raster
+          // thread is free to enque work, rather than waiting for the GPU work
+          // itself to finish.
+          if (completion_callback) {
+            completion_callback.value()(count);
+          }
+        }
+      });
+      i++;
+    }
+  });
+}
 
 }  // namespace flutter_runner

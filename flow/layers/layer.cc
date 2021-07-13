@@ -12,7 +12,8 @@ namespace flutter {
 Layer::Layer()
     : paint_bounds_(SkRect::MakeEmpty()),
       unique_id_(NextUniqueID()),
-      needs_system_composite_(false) {}
+      original_layer_id_(unique_id_),
+      subtree_has_platform_view_(false) {}
 
 Layer::~Layer() = default;
 
@@ -54,10 +55,6 @@ Layer::AutoPrerollSaveLayerState::~AutoPrerollSaveLayerState() {
         (prev_surface_needs_readback_ || layer_itself_performs_readback_);
   }
 }
-
-#if defined(OS_FUCHSIA)
-void Layer::UpdateScene(SceneUpdateContext& context) {}
-#endif  // defined(OS_FUCHSIA)
 
 Layer::AutoSaveLayer::AutoSaveLayer(const PaintContext& paint_context,
                                     const SkRect& bounds,

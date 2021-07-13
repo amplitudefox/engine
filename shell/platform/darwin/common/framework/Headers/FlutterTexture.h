@@ -8,11 +8,11 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 
-#include "FlutterMacros.h"
+#import "FlutterMacros.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
-FLUTTER_EXPORT
+FLUTTER_DARWIN_EXPORT
 /**
  * Represents a texture that can be shared with Flutter.
  *
@@ -25,13 +25,13 @@ FLUTTER_EXPORT
 /**
  * Called when the texture is unregistered.
  *
- * Called on the GPU thread.
+ * Called on the raster thread.
  */
 @optional
 - (void)onTextureUnregistered:(NSObject<FlutterTexture>*)texture;
 @end
 
-FLUTTER_EXPORT
+FLUTTER_DARWIN_EXPORT
 /**
  * A collection of registered `FlutterTexture`'s.
  */
@@ -39,13 +39,13 @@ FLUTTER_EXPORT
 /**
  * Registers a `FlutterTexture` for usage in Flutter and returns an id that can be used to reference
  * that texture when calling into Flutter with channels. Textures must be registered on the
- * platform thread.
+ * platform thread. On success returns the pointer to the registered texture, else returns 0.
  */
 - (int64_t)registerTexture:(NSObject<FlutterTexture>*)texture;
 /**
  * Notifies Flutter that the content of the previously registered texture has been updated.
  *
- * This will trigger a call to `-[FlutterTexture copyPixelBuffer]` on the GPU thread.
+ * This will trigger a call to `-[FlutterTexture copyPixelBuffer]` on the raster thread.
  */
 - (void)textureFrameAvailable:(int64_t)textureId;
 /**

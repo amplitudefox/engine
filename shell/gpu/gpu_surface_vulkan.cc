@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #include "flutter/shell/gpu/gpu_surface_vulkan.h"
+
 #include "flutter/fml/logging.h"
 
 namespace flutter {
@@ -11,8 +12,20 @@ GPUSurfaceVulkan::GPUSurfaceVulkan(
     GPUSurfaceVulkanDelegate* delegate,
     std::unique_ptr<vulkan::VulkanNativeSurface> native_surface,
     bool render_to_surface)
-    : window_(delegate->vk(), std::move(native_surface), render_to_surface),
-      delegate_(delegate),
+    : GPUSurfaceVulkan(/*context=*/nullptr,
+                       delegate,
+                       std::move(native_surface),
+                       render_to_surface) {}
+
+GPUSurfaceVulkan::GPUSurfaceVulkan(
+    const sk_sp<GrDirectContext>& context,
+    GPUSurfaceVulkanDelegate* delegate,
+    std::unique_ptr<vulkan::VulkanNativeSurface> native_surface,
+    bool render_to_surface)
+    : window_(context,
+              delegate->vk(),
+              std::move(native_surface),
+              render_to_surface),
       render_to_surface_(render_to_surface),
       weak_factory_(this) {}
 
@@ -42,9 +55,9 @@ std::unique_ptr<SurfaceFrame> GPUSurfaceVulkan::AcquireFrame(
   SurfaceFrame::SubmitCallback callback =
       [weak_this = weak_factory_.GetWeakPtr()](const SurfaceFrame&,
                                                SkCanvas* canvas) -> bool {
-    // Frames are only ever acquired on the GPU thread. This is also the thread
-    // on which the weak pointer factory is collected (as this instance is owned
-    // by the rasterizer). So this use of weak pointers is safe.
+    // Frames are only ever acquired on the raster thread. This is also the
+    // thread on which the weak pointer factory is collected (as this instance
+    // is owned by the rasterizer). So this use of weak pointers is safe.
     if (canvas == nullptr || !weak_this) {
       return false;
     }
@@ -62,12 +75,8 @@ SkMatrix GPUSurfaceVulkan::GetRootTransformation() const {
   return matrix;
 }
 
-GrContext* GPUSurfaceVulkan::GetContext() {
+GrDirectContext* GPUSurfaceVulkan::GetContext() {
   return window_.GetSkiaGrContext();
-}
-
-flutter::ExternalViewEmbedder* GPUSurfaceVulkan::GetExternalViewEmbedder() {
-  return delegate_->GetExternalViewEmbedder();
 }
 
 }  // namespace flutter

@@ -5,8 +5,7 @@
 #ifndef FLUTTER_FML_TIME_TIME_POINT_H_
 #define FLUTTER_FML_TIME_TIME_POINT_H_
 
-#include <stdint.h>
-
+#include <cstdint>
 #include <iosfwd>
 
 #include "flutter/fml/time/time_delta.h"
@@ -25,6 +24,8 @@ class TimePoint {
   constexpr TimePoint() = default;
 
   static TimePoint Now();
+
+  static TimePoint CurrentWallTime();
 
   static constexpr TimePoint Min() {
     return TimePoint(std::numeric_limits<int64_t>::min());

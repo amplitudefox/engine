@@ -2,16 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'package:ui/ui.dart';
 
+import 'package:test/bootstrap/browser.dart';
 import 'package:test/test.dart';
+
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
 
 class NotAColor extends Color {
   const NotAColor(int value) : super(value);
 }
 
-void main() {
+void testMain() {
   test('color accessors should work', () {
     const Color foo = Color(0x12345678);
     expect(foo.alpha, equals(0x12));
@@ -28,29 +32,21 @@ void main() {
   });
 
   test('color created with out of bounds value', () {
-    try {
-      const Color c = Color(0x100 << 24);
-      final Paint p = Paint();
-      p.color = c;
-    } catch (e) {
-      expect(e != null, equals(true));
-    }
+    const Color c = Color(0x100 << 24);
+    final Paint p = Paint();
+    p.color = c;
   });
 
   test('color created with wildly out of bounds value', () {
-    try {
-      const Color c = Color(1 << 1000000);
-      final Paint p = Paint();
-      p.color = c;
-    } catch (e) {
-      expect(e != null, equals(true));
-    }
+    const Color c = Color(1 << 1000000);
+    final Paint p = Paint();
+    p.color = c;
   });
 
   test('two colors are only == if they have the same runtime type', () {
     expect(const Color(123), equals(const Color(123)));
     expect(const Color(123),
-        equals(Color(123))); // ignore: prefer_const_constructors
+        equals(Color(123)));
     expect(const Color(123), isNot(equals(const Color(321))));
     expect(const Color(123), isNot(equals(const NotAColor(123))));
     expect(const NotAColor(123), isNot(equals(const Color(123))));

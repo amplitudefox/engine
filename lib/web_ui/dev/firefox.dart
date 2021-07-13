@@ -2,19 +2,43 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:async';
 import 'dart:io';
 
 import 'package:pedantic/pedantic.dart';
 
-import 'package:test_core/src/util/io.dart'; // ignore: implementation_imports
+import 'package:path/path.dart' as path;
+import 'package:test_api/src/backend/runtime.dart';
+import 'package:test_core/src/util/io.dart';
 
 import 'browser.dart';
-import 'firefox_installer.dart';
 import 'common.dart';
+import 'environment.dart';
+import 'firefox_installer.dart';
 
-/// A class for running an instance of Firefox.
+/// Provides an environment for the desktop Firefox.
+class FirefoxEnvironment implements BrowserEnvironment {
+  @override
+  Browser launchBrowserInstance(Uri url, {bool debug = false}) {
+    return Firefox(url, debug: debug);
+  }
+
+  @override
+  Runtime get packageTestRuntime => Runtime.firefox;
+
+  @override
+  Future<void> prepareEnvironment() async {
+    // Firefox doesn't need any special prep.
+  }
+
+  @override
+  String get packageTestConfigurationYamlFile => 'dart_test_firefox.yaml';
+
+  @override
+  ScreenshotManager? getScreenshotManager() => null;
+}
+
+/// Runs desktop Firefox.
 ///
 /// Most of the communication with the browser is expected to happen via HTTP,
 /// so this exposes a bare-bones API. The browser starts as soon as the class is
@@ -28,14 +52,10 @@ class Firefox extends Browser {
   @override
   final Future<Uri> remoteDebuggerUrl;
 
-  static String version;
-
   /// Starts a new instance of Firefox open to the given [url], which may be a
   /// [Uri] or a [String].
   factory Firefox(Uri url, {bool debug = false}) {
-    version = FirefoxArgParser.instance.version;
-
-    assert(version != null);
+    final String version = FirefoxArgParser.instance.version;
     var remoteDebuggerCompleter = Completer<Uri>.sync();
     return Firefox._(() async {
       final BrowserInstallation installation = await getOrInstallFirefox(
@@ -43,14 +63,33 @@ class Firefox extends Browser {
         infoLog: isCirrus ? stdout : DevNull(),
       );
 
+      // Using a profile on opening will prevent popups related to profiles.
+      final _profile = '''
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("dom.disable_open_during_load", false);
+user_pref("dom.max_script_run_time", 0);
+''';
+
+      final Directory temporaryProfileDirectory = Directory(
+          path.join(environment.webUiDartToolDir.path, 'firefox_profile'));
+
       // A good source of various Firefox Command Line options:
       // https://developer.mozilla.org/en-US/docs/Mozilla/Command_Line_Options#Browser
       //
-      var dir = createTempDir();
+      if (temporaryProfileDirectory.existsSync()) {
+        temporaryProfileDirectory.deleteSync(recursive: true);
+      }
+      temporaryProfileDirectory.createSync(recursive: true);
+
+      File(path.join(temporaryProfileDirectory.path, 'prefs.js'))
+          .writeAsStringSync(_profile);
       bool isMac = Platform.isMacOS;
       var args = [
         url.toString(),
-        '--headless',
+        '--profile',
+        '${temporaryProfileDirectory.path}',
+        if (!debug)
+          '--headless',
         '-width $kMaxScreenshotWidth',
         '-height $kMaxScreenshotHeight',
         isMac ? '--new-window' : '-new-window',
@@ -59,14 +98,14 @@ class Firefox extends Browser {
       ];
 
       final Process process =
-          await Process.start(installation.executable, args,
-            workingDirectory: dir);
+          await Process.start(installation.executable, args);
 
       remoteDebuggerCompleter.complete(
           getRemoteDebuggerUrl(Uri.parse('http://localhost:$kDevtoolsPort')));
 
-      unawaited(process.exitCode
-          .then((_) => Directory(dir).deleteSync(recursive: true)));
+      unawaited(process.exitCode.then((_) {
+        temporaryProfileDirectory.deleteSync(recursive: true);
+      }));
 
       return process;
     }, remoteDebuggerCompleter.future);

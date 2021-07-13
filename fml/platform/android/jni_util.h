@@ -17,6 +17,8 @@ namespace jni {
 
 void InitJavaVM(JavaVM* vm);
 
+// Returns a JNI environment for the current thread.
+// Attaches the thread to JNI if needed.
 JNIEnv* AttachCurrentThread();
 
 void DetachFromVM();
@@ -31,6 +33,10 @@ std::vector<std::string> StringArrayToVector(JNIEnv* env, jobjectArray jargs);
 ScopedJavaLocalRef<jobjectArray> VectorToStringArray(
     JNIEnv* env,
     const std::vector<std::string>& vector);
+
+ScopedJavaLocalRef<jobjectArray> VectorToBufferArray(
+    JNIEnv* env,
+    const std::vector<std::vector<uint8_t>>& vector);
 
 bool HasException(JNIEnv* env);
 

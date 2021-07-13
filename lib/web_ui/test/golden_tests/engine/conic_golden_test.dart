@@ -2,38 +2,44 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:html' as html;
 
+import 'package:test/bootstrap/browser.dart';
+import 'package:test/test.dart';
 import 'package:ui/src/engine.dart';
 import 'package:ui/ui.dart';
-import 'package:test/test.dart';
 
 import 'package:web_engine_tester/golden_tester.dart';
 
-void main() async {
+void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() async {
   final Rect region = Rect.fromLTWH(8, 8, 600, 800); // Compensate for old scuba tester padding
 
   Future<void> testPath(Path path, String scubaFileName) async {
     const Rect canvasBounds = Rect.fromLTWH(0, 0, 600, 800);
-    final BitmapCanvas bitmapCanvas = BitmapCanvas(canvasBounds);
+    final BitmapCanvas bitmapCanvas = BitmapCanvas(canvasBounds,
+        RenderStrategy());
     final RecordingCanvas canvas = RecordingCanvas(canvasBounds);
 
-    Paint paint = Paint()
+    SurfacePaint paint = SurfacePaint()
       ..color = const Color(0x7F7F7F7F)
       ..style = PaintingStyle.fill;
 
     canvas.drawPath(path, paint);
 
-    paint = Paint()
+    paint = SurfacePaint()
       ..strokeWidth = 2.0
       ..color = const Color(0xFF7F007F)
       ..style = PaintingStyle.stroke;
 
     canvas.drawPath(path, paint);
+    canvas.endRecording();
 
-    html.document.body.append(bitmapCanvas.rootElement);
-    canvas.apply(bitmapCanvas);
+    html.document.body!.append(bitmapCanvas.rootElement);
+    canvas.apply(bitmapCanvas, canvasBounds);
     await matchGoldenFile('$scubaFileName.png', region: region);
     bitmapCanvas.rootElement.remove();
   }

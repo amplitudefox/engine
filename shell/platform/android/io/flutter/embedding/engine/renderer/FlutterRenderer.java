@@ -99,18 +99,18 @@ public class FlutterRenderer implements TextureRegistry {
     final SurfaceTextureRegistryEntry entry =
         new SurfaceTextureRegistryEntry(nextTextureId.getAndIncrement(), surfaceTexture);
     Log.v(TAG, "New SurfaceTexture ID: " + entry.id());
-    registerTexture(entry.id(), surfaceTexture);
+    registerTexture(entry.id(), entry.textureWrapper());
     return entry;
   }
 
   final class SurfaceTextureRegistryEntry implements TextureRegistry.SurfaceTextureEntry {
     private final long id;
-    @NonNull private final SurfaceTexture surfaceTexture;
+    @NonNull private final SurfaceTextureWrapper textureWrapper;
     private boolean released;
 
     SurfaceTextureRegistryEntry(long id, @NonNull SurfaceTexture surfaceTexture) {
       this.id = id;
-      this.surfaceTexture = surfaceTexture;
+      this.textureWrapper = new SurfaceTextureWrapper(surfaceTexture);
 
       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
         // The callback relies on being executed on the UI thread (unsynchronised read of
@@ -118,12 +118,12 @@ public class FlutterRenderer implements TextureRegistry {
         // and also the engine code check for platform thread in
         // Shell::OnPlatformViewMarkTextureFrameAvailable),
         // so we explicitly pass a Handler for the current thread.
-        this.surfaceTexture.setOnFrameAvailableListener(onFrameListener, new Handler());
+        this.surfaceTexture().setOnFrameAvailableListener(onFrameListener, new Handler());
       } else {
         // Android documentation states that the listener can be called on an arbitrary thread.
         // But in practice, versions of Android that predate the newer API will call the listener
         // on the thread where the SurfaceTexture was constructed.
-        this.surfaceTexture.setOnFrameAvailableListener(onFrameListener);
+        this.surfaceTexture().setOnFrameAvailableListener(onFrameListener);
       }
     }
 
@@ -131,21 +131,26 @@ public class FlutterRenderer implements TextureRegistry {
         new SurfaceTexture.OnFrameAvailableListener() {
           @Override
           public void onFrameAvailable(@NonNull SurfaceTexture texture) {
-            if (released) {
-              // Even though we make sure to unregister the callback before releasing, as of Android
-              // O
-              // SurfaceTexture has a data race when accessing the callback, so the callback may
-              // still be called by a stale reference after released==true and mNativeView==null.
+            if (released || !flutterJNI.isAttached()) {
+              // Even though we make sure to unregister the callback before releasing, as of
+              // Android O, SurfaceTexture has a data race when accessing the callback, so the
+              // callback may still be called by a stale reference after released==true and
+              // mNativeView==null.
               return;
             }
             markTextureFrameAvailable(id);
           }
         };
 
+    @NonNull
+    public SurfaceTextureWrapper textureWrapper() {
+      return textureWrapper;
+    }
+
     @Override
     @NonNull
     public SurfaceTexture surfaceTexture() {
-      return surfaceTexture;
+      return textureWrapper.surfaceTexture();
     }
 
     @Override
@@ -159,7 +164,7 @@ public class FlutterRenderer implements TextureRegistry {
         return;
       }
       Log.v(TAG, "Releasing a SurfaceTexture (" + id + ").");
-      surfaceTexture.release();
+      textureWrapper.release();
       unregisterTexture(id);
       released = true;
     }
@@ -181,6 +186,18 @@ public class FlutterRenderer implements TextureRegistry {
     this.surface = surface;
 
     flutterJNI.onSurfaceCreated(surface);
+  }
+
+  /**
+   * Swaps the {@link Surface} used to render the current frame.
+   *
+   * <p>In hybrid composition, the root surfaces changes from {@link
+   * android.view.SurfaceHolder#getSurface()} to {@link android.media.ImageReader#getSurface()} when
+   * a platform view is in the current frame.
+   */
+  public void swapSurface(@NonNull Surface surface) {
+    this.surface = surface;
+    flutterJNI.onSurfaceWindowChanged(surface);
   }
 
   /**
@@ -219,8 +236,20 @@ public class FlutterRenderer implements TextureRegistry {
     isDisplayingFlutterUi = false;
   }
 
-  // TODO(mattcarroll): describe the native behavior that this invokes
+  /**
+   * Notifies Flutter that the viewport metrics, e.g. window height and width, have changed.
+   *
+   * <p>If the width, height, or devicePixelRatio are less than or equal to 0, this update is
+   * ignored.
+   *
+   * @param viewportMetrics The metrics to send to the Dart application.
+   */
   public void setViewportMetrics(@NonNull ViewportMetrics viewportMetrics) {
+    // We might get called with just the DPR if width/height aren't available yet.
+    // Just ignore, as it will get called again when width/height are set.
+    if (!viewportMetrics.validate()) {
+      return;
+    }
     Log.v(
         TAG,
         "Setting viewport metrics\n"
@@ -230,13 +259,13 @@ public class FlutterRenderer implements TextureRegistry {
             + viewportMetrics.height
             + "\n"
             + "Padding - L: "
-            + viewportMetrics.paddingLeft
+            + viewportMetrics.viewPaddingLeft
             + ", T: "
-            + viewportMetrics.paddingTop
+            + viewportMetrics.viewPaddingTop
             + ", R: "
-            + viewportMetrics.paddingRight
+            + viewportMetrics.viewPaddingRight
             + ", B: "
-            + viewportMetrics.paddingBottom
+            + viewportMetrics.viewPaddingBottom
             + "\n"
             + "Insets - L: "
             + viewportMetrics.viewInsetLeft
@@ -260,10 +289,10 @@ public class FlutterRenderer implements TextureRegistry {
         viewportMetrics.devicePixelRatio,
         viewportMetrics.width,
         viewportMetrics.height,
-        viewportMetrics.paddingTop,
-        viewportMetrics.paddingRight,
-        viewportMetrics.paddingBottom,
-        viewportMetrics.paddingLeft,
+        viewportMetrics.viewPaddingTop,
+        viewportMetrics.viewPaddingRight,
+        viewportMetrics.viewPaddingBottom,
+        viewportMetrics.viewPaddingLeft,
         viewportMetrics.viewInsetTop,
         viewportMetrics.viewInsetRight,
         viewportMetrics.viewInsetBottom,
@@ -286,8 +315,8 @@ public class FlutterRenderer implements TextureRegistry {
   }
 
   // TODO(mattcarroll): describe the native behavior that this invokes
-  private void registerTexture(long textureId, @NonNull SurfaceTexture surfaceTexture) {
-    flutterJNI.registerTexture(textureId, surfaceTexture);
+  private void registerTexture(long textureId, @NonNull SurfaceTextureWrapper textureWrapper) {
+    flutterJNI.registerTexture(textureId, textureWrapper);
   }
 
   // TODO(mattcarroll): describe the native behavior that this invokes
@@ -302,7 +331,7 @@ public class FlutterRenderer implements TextureRegistry {
 
   // TODO(mattcarroll): describe the native behavior that this invokes
   public boolean isSoftwareRenderingEnabled() {
-    return flutterJNI.nativeGetIsSoftwareRenderingEnabled();
+    return flutterJNI.getIsSoftwareRenderingEnabled();
   }
 
   // TODO(mattcarroll): describe the native behavior that this invokes
@@ -331,10 +360,10 @@ public class FlutterRenderer implements TextureRegistry {
     public float devicePixelRatio = 1.0f;
     public int width = 0;
     public int height = 0;
-    public int paddingTop = 0;
-    public int paddingRight = 0;
-    public int paddingBottom = 0;
-    public int paddingLeft = 0;
+    public int viewPaddingTop = 0;
+    public int viewPaddingRight = 0;
+    public int viewPaddingBottom = 0;
+    public int viewPaddingLeft = 0;
     public int viewInsetTop = 0;
     public int viewInsetRight = 0;
     public int viewInsetBottom = 0;
@@ -343,5 +372,14 @@ public class FlutterRenderer implements TextureRegistry {
     public int systemGestureInsetRight = 0;
     public int systemGestureInsetBottom = 0;
     public int systemGestureInsetLeft = 0;
+
+    /**
+     * Whether this instance contains valid metrics for the Flutter application.
+     *
+     * @return True if width, height, and devicePixelRatio are > 0; false otherwise.
+     */
+    boolean validate() {
+      return width > 0 && height > 0 && devicePixelRatio > 0;
+    }
   }
 }

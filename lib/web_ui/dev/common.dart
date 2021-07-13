@@ -2,11 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// @dart = 2.6
 import 'dart:io' as io;
 
 import 'package:args/args.dart';
-import 'package:meta/meta.dart';
 import 'package:path/path.dart' as path;
 import 'package:yaml/yaml.dart';
 
@@ -18,41 +16,24 @@ const int kMaxScreenshotWidth = 1024;
 const int kMaxScreenshotHeight = 1024;
 const double kMaxDiffRateFailure = 0.28 / 100; // 0.28%
 
-class BrowserInstallerException implements Exception {
-  BrowserInstallerException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => message;
-}
-
-class DriverException implements Exception {
-  DriverException(this.message);
-
-  final String message;
-
-  @override
-  String toString() => message;
-}
-
 abstract class PlatformBinding {
   static PlatformBinding get instance {
-    if (_instance == null) {
-      if (io.Platform.isLinux) {
-        _instance = _LinuxBinding();
-      } else if (io.Platform.isMacOS) {
-        _instance = _MacBinding();
-      } else if (io.Platform.isWindows) {
-        _instance = _WindowsBinding();
-      } else {
-        throw '${io.Platform.operatingSystem} is not supported';
-      }
-    }
-    return _instance;
+    return _instance ??= _createInstance();
   }
+  static PlatformBinding? _instance;
 
-  static PlatformBinding _instance;
+  static PlatformBinding _createInstance() {
+    if (io.Platform.isLinux) {
+      return _LinuxBinding();
+    }
+    if (io.Platform.isMacOS) {
+      return _MacBinding();
+    }
+    if (io.Platform.isWindows) {
+      return _WindowsBinding();
+    }
+    throw '${io.Platform.operatingSystem} is not supported';
+  }
 
   int getChromeBuild(YamlMap chromeLock);
   String getChromeDownloadUrl(String version);
@@ -71,17 +52,17 @@ const String _kBaseDownloadUrl =
 class _WindowsBinding implements PlatformBinding {
   @override
   int getChromeBuild(YamlMap browserLock) {
-    final YamlMap chromeMap = browserLock['chrome'];
-    return chromeMap['Win'];
+    final YamlMap chromeMap = browserLock['chrome'] as YamlMap;
+    return chromeMap['Win'] as int;
   }
 
   @override
   String getChromeDownloadUrl(String version) =>
-      'https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Win%2F${version}%2Fchrome-win32.zip?alt=media';
+      'https://www.googleapis.com/download/storage/v1/b/chromium-browser-snapshots/o/Win%2F${version}%2Fchrome-win.zip?alt=media';
 
   @override
   String getChromeExecutablePath(io.Directory versionDir) =>
-      path.join(versionDir.path, 'chrome-win32', 'chrome');
+      path.join(versionDir.path, 'chrome-win', 'chrome.exe');
 
   @override
   String getFirefoxDownloadUrl(String version) =>
@@ -110,8 +91,8 @@ class _WindowsBinding implements PlatformBinding {
 class _LinuxBinding implements PlatformBinding {
   @override
   int getChromeBuild(YamlMap browserLock) {
-    final YamlMap chromeMap = browserLock['chrome'];
-    return chromeMap['Linux'];
+    final YamlMap chromeMap = browserLock['chrome'] as YamlMap;
+    return chromeMap['Linux'] as int;
   }
 
   @override
@@ -151,8 +132,8 @@ class _LinuxBinding implements PlatformBinding {
 class _MacBinding implements PlatformBinding {
   @override
   int getChromeBuild(YamlMap browserLock) {
-    final YamlMap chromeMap = browserLock['chrome'];
-    return chromeMap['Mac'];
+    final YamlMap chromeMap = browserLock['chrome'] as YamlMap;
+    return chromeMap['Mac'] as int;
   }
 
   @override
@@ -192,10 +173,10 @@ class _MacBinding implements PlatformBinding {
 }
 
 class BrowserInstallation {
-  const BrowserInstallation(
-      {@required this.version,
-      @required this.executable,
-      fetchLatestChromeVersion});
+  const BrowserInstallation({
+    required this.version,
+    required this.executable,
+  });
 
   /// Browser version.
   final String version;
@@ -230,14 +211,14 @@ class BrowserLock {
   BrowserLock._() {
     final io.File lockFile = io.File(
         path.join(environment.webUiRootDir.path, 'dev', 'browser_lock.yaml'));
-    this._configuration = loadYaml(lockFile.readAsStringSync());
+    this._configuration = loadYaml(lockFile.readAsStringSync()) as YamlMap;
   }
 }
 
 /// A string sink that swallows all input.
 class DevNull implements StringSink {
   @override
-  void write(Object obj) {}
+  void write(Object? obj) {}
 
   @override
   void writeAll(Iterable objects, [String separator = ""]) {}
@@ -246,18 +227,15 @@ class DevNull implements StringSink {
   void writeCharCode(int charCode) {}
 
   @override
-  void writeln([Object obj = ""]) {}
+  void writeln([Object? obj = ""]) {}
 }
 
+/// Whether the felt command is running on Cirrus CI.
 bool get isCirrus => io.Platform.environment['CIRRUS_CI'] == 'true';
 
-/// There might be proccesses started during the tests.
-///
-/// Use this list to store those Processes, for cleaning up before shutdown.
-final List<io.Process> processesToCleanUp = List<io.Process>();
+/// Whether the felt command is running on LUCI.
+bool get isLuci => io.Platform.environment['LUCI_CONTEXT'] != null;
 
-/// There might be temporary directories created during the tests.
-///
-/// Use this list to store those directories and for deleteing them before
-/// shutdown.
-final List<io.Directory> temporaryDirectories = List<io.Directory>();
+/// Whether the felt command is running on one of the Continuous Integration
+/// environements.
+bool get isCi => isCirrus || isLuci;

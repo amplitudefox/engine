@@ -2,19 +2,33 @@
   "program": {
     "binary": "bin/app"
   },
+  "facets": {
+    "fuchsia.test": {
+      "system-services": [
+        "fuchsia.sysmem.Allocator",
+        "fuchsia.vulkan.loader.Loader"
+      ]
+    }
+  },
   "sandbox": {
     "features": [
       "vulkan",
-      "deprecated-ambient-replace-as-executable"
+      "deprecated-ambient-replace-as-executable",
+      "isolated-cache-storage",
+      "isolated-temp"
     ],
     "services": [
       "fuchsia.accessibility.semantics.SemanticsManager",
-      "fuchsia.process.Launcher",
       "fuchsia.deprecatedtimezone.Timezone",
-      "fuchsia.netstack.Netstack",
-      "fuchsia.vulkan.loader.Loader",
+      "fuchsia.fonts.Provider",
+      "fuchsia.intl.PropertyProvider",
       "fuchsia.logger.LogSink",
-      "fuchsia.tracing.provider.Registry"
+      "fuchsia.process.Launcher",
+      "fuchsia.settings.Intl",
+      "fuchsia.sysmem.Allocator",
+      "fuchsia.tracing.provider.Registry",
+      "fuchsia.ui.input3.Keyboard",
+      "fuchsia.vulkan.loader.Loader"
     ]
   }
 }

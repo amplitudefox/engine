@@ -1,19 +1,34 @@
 // Copyright 2013 The Flutter Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+@JS()
+library dom_renderer_test; // We need this to mess with the ShadowDOM.
 
-// @dart = 2.6
 import 'dart:html' as html;
 
-import 'package:ui/src/engine.dart';
+import 'package:js/js.dart';
+import 'package:test/bootstrap/browser.dart';
 import 'package:test/test.dart';
+import 'package:ui/src/engine.dart';
 
 void main() {
+  internalBootstrapBrowserTest(() => testMain);
+}
+
+void testMain() {
+  test('populates flt-renderer and flt-build-mode', () {
+    DomRenderer();
+    expect(html.document.body!.attributes['flt-renderer'],
+        'html (requested explicitly)');
+    expect(html.document.body!.attributes['flt-build-mode'], 'debug');
+  });
+
   test('creating elements works', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
     expect(element, isNotNull);
   });
+
   test('can append children to parents', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element parent = renderer.createElement('div');
@@ -21,18 +36,21 @@ void main() {
     renderer.append(parent, child);
     expect(parent.children, hasLength(1));
   });
+
   test('can set text on elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
     renderer.setText(element, 'Hello World');
     expect(element.text, 'Hello World');
   });
+
   test('can set attributes on elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
     renderer.setElementAttribute(element, 'id', 'foo');
     expect(element.id, 'foo');
   });
+
   test('can add classes to elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
@@ -40,6 +58,7 @@ void main() {
     renderer.addElementClass(element, 'bar');
     expect(element.classes, <String>['foo', 'bar']);
   });
+
   test('can remove classes from elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
@@ -49,26 +68,30 @@ void main() {
     renderer.removeElementClass(element, 'foo');
     expect(element.classes, <String>['bar']);
   });
+
   test('can set style properties on elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
-    renderer.setElementStyle(element, 'color', 'red');
+    DomRenderer.setElementStyle(element, 'color', 'red');
     expect(element.style.color, 'red');
   });
+
   test('can remove style properties from elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
-    renderer.setElementStyle(element, 'color', 'blue');
+    DomRenderer.setElementStyle(element, 'color', 'blue');
     expect(element.style.color, 'blue');
-    renderer.setElementStyle(element, 'color', null);
+    DomRenderer.setElementStyle(element, 'color', null);
     expect(element.style.color, '');
   });
+
   test('elements can have children', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
     renderer.createElement('div', parent: element);
     expect(element.children, hasLength(1));
   });
+
   test('can detach elements', () {
     final DomRenderer renderer = DomRenderer();
     final html.Element element = renderer.createElement('div');
@@ -76,35 +99,12 @@ void main() {
     renderer.detachElement(child);
     expect(element.children, isEmpty);
   });
-  test('can reattach detached elements', () {
-    final DomRenderer renderer = DomRenderer();
-    final html.Element element = renderer.createElement('div');
-    final html.Element child = renderer.createElement('div', parent: element);
-    final html.Element otherChild =
-        renderer.createElement('foo', parent: element);
-    renderer.detachElement(child);
-    expect(element.children, hasLength(1));
-    renderer.attachBeforeElement(element, otherChild, child);
-    expect(element.children, hasLength(2));
-  });
-  test('insert two elements in the middle of a child list', () {
-    final DomRenderer renderer = DomRenderer();
-    final html.Element parent = renderer.createElement('div');
-    renderer.createElement('a', parent: parent);
-    final html.Element childD = renderer.createElement('d', parent: parent);
-    expect(parent.innerHtml, '<a></a><d></d>');
-    final html.Element childB = renderer.createElement('b', parent: parent);
-    final html.Element childC = renderer.createElement('c', parent: parent);
-    renderer.attachBeforeElement(parent, childD, childB);
-    renderer.attachBeforeElement(parent, childD, childC);
-    expect(parent.innerHtml, '<a></a><b></b><c></c><d></d>');
-  });
 
   test('innerHeight/innerWidth are equal to visualViewport height and width',
       () {
     if (html.window.visualViewport != null) {
-      expect(html.window.visualViewport.width, html.window.innerWidth);
-      expect(html.window.visualViewport.height, html.window.innerHeight);
+      expect(html.window.visualViewport!.width, html.window.innerWidth);
+      expect(html.window.visualViewport!.height, html.window.innerHeight);
     }
   });
 
@@ -112,8 +112,8 @@ void main() {
     final html.MetaElement existingMeta = html.MetaElement()
       ..name = 'viewport'
       ..content = 'foo=bar';
-    html.document.head.append(existingMeta);
-    expect(existingMeta.isConnected, true);
+    html.document.head!.append(existingMeta);
+    expect(existingMeta.isConnected, isTrue);
 
     final DomRenderer renderer = DomRenderer();
     renderer.reset();
@@ -124,9 +124,44 @@ void main() {
           browserEngine == BrowserEngine.edge));
 
   test('accesibility placeholder is attached after creation', () {
-    DomRenderer();
+    final DomRenderer renderer = DomRenderer();
 
-    expect(html.document.getElementsByTagName('flt-semantics-placeholder'),
-        isNotEmpty);
+    expect(
+      renderer.glassPaneShadow?.querySelectorAll('flt-semantics-placeholder'),
+      isNotEmpty,
+    );
+  });
+
+  test('renders a shadowRoot by default', () {
+    final DomRenderer renderer = DomRenderer();
+
+    HostNode hostNode = renderer.glassPaneShadow!;
+
+    expect(hostNode.node, isA<html.ShadowRoot>());
+  });
+
+  test('starts without shadowDom available too', () {
+    final dynamic oldAttachShadow = attachShadow;
+    expect(oldAttachShadow, isNotNull);
+
+    attachShadow = null; // Break ShadowDOM
+
+    final DomRenderer renderer = DomRenderer();
+
+    HostNode hostNode = renderer.glassPaneShadow!;
+
+    expect(hostNode.node, isA<html.Element>());
+    expect(
+      (hostNode.node as html.Element).tagName,
+      equalsIgnoringCase('flt-element-host-node'),
+    );
+
+    attachShadow = oldAttachShadow; // Restore ShadowDOM
   });
 }
+
+@JS('Element.prototype.attachShadow')
+external dynamic get attachShadow;
+
+@JS('Element.prototype.attachShadow')
+external set attachShadow(dynamic x);
